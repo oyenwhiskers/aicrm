@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\DocumentType;
 use App\Enums\UploadStatus;
 use App\Models\Lead;
 use App\Models\LeadDocument;
@@ -10,9 +11,15 @@ use Illuminate\Support\Facades\Storage;
 
 class DocumentService
 {
-    public function storeAndRegister(Lead $lead, UploadedFile $file, string $documentType, string $disk = 'public'): LeadDocument
+    public function registerUploadedFile(Lead $lead, UploadedFile $file, string $disk = 'public'): LeadDocument
     {
-        $path = $file->store("leads/{$lead->id}/documents/{$documentType}", $disk);
+        return $this->storeAndRegister($lead, $file, DocumentType::OTHER->value, null, $disk);
+    }
+
+    public function storeAndRegister(Lead $lead, UploadedFile $file, string $documentType, ?string $documentSlot = null, string $disk = 'public'): LeadDocument
+    {
+        $pathSuffix = $documentSlot ? "{$documentType}/{$documentSlot}" : $documentType;
+        $path = $file->store("leads/{$lead->id}/documents/{$pathSuffix}", $disk);
 
         if ($path === false) {
             throw new \RuntimeException('Unable to store uploaded file.');
@@ -23,13 +30,23 @@ class DocumentService
             'original_filename' => $file->getClientOriginalName(),
             'storage_disk' => $disk,
             'storage_path' => $path,
-            'upload_status' => UploadStatus::UPLOADED,
+            'upload_status' => UploadStatus::QUEUED,
             'uploaded_at' => now(),
             'metadata' => [
+                'document_slot' => $documentSlot,
                 'size' => $file->getSize(),
                 'mime_type' => $file->getMimeType(),
                 'public_url' => Storage::disk($disk)->url($path),
             ],
         ]);
+    }
+
+    public function deleteRegisteredDocument(LeadDocument $document): void
+    {
+        if (filled($document->storage_disk) && filled($document->storage_path)) {
+            Storage::disk($document->storage_disk)->delete($document->storage_path);
+        }
+
+        $document->delete();
     }
 }

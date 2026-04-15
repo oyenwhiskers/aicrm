@@ -20,10 +20,6 @@ class ExtractionService
     {
         $document->loadMissing('lead.profile');
 
-        if (! $this->supports($document->document_type)) {
-            return $this->storeUnsupportedResult($document);
-        }
-
         if (blank(config('services.gemini.api_key'))) {
             return $this->storeUnavailableResult($document);
         }
@@ -32,15 +28,42 @@ class ExtractionService
             $payload = Storage::disk($document->storage_disk)->get($document->storage_path);
 
             $result = $this->geminiExtractionService->extract(
-                $document->document_type,
                 $document->metadata['mime_type'] ?? null,
                 base64_encode($payload)
             );
 
+            $normalizedClassification = $this->normalizeClassification(
+                $result['classification'] ?? [],
+                $result['fields'] ?? [],
+                $result['raw_text'] ?? null,
+                $result['summary'] ?? null,
+            );
+            $detectedType = DocumentType::tryFrom((string) ($normalizedClassification['document_type'] ?? '')) ?? DocumentType::OTHER;
+            $metadata = [
+                ...($document->metadata ?? []),
+                'classification' => [
+                    'document_type' => $detectedType->value,
+                    'ic_side' => $normalizedClassification['ic_side'] ?? null,
+                    'statement_year' => $normalizedClassification['statement_year'] ?? null,
+                    'statement_month' => $normalizedClassification['statement_month'] ?? null,
+                    'statement_period' => $normalizedClassification['statement_period'] ?? null,
+                    'confidence' => $result['confidence'] ?? 'medium',
+                    'needs_review' => (bool) ($result['needs_review'] ?? false),
+                ],
+                'effective_document_type' => data_get($document->metadata, 'manual_assignment_key')
+                    ? (data_get($document->metadata, 'effective_document_type') ?? $detectedType->value)
+                    : $detectedType->value,
+            ];
+
+            $document->forceFill([
+                'document_type' => $detectedType,
+                'metadata' => $metadata,
+            ])->save();
+
             $record = $document->lead->extractedData()->updateOrCreate(
                 ['lead_document_id' => $document->id],
                 [
-                    'document_type' => $document->document_type,
+                    'document_type' => $detectedType,
                     'extracted_summary' => $result['summary'] ?? 'Extraction completed.',
                     'structured_fields' => $result,
                     'extraction_status' => ($result['needs_review'] ?? false)
@@ -64,6 +87,17 @@ class ExtractionService
 
             return $record;
         } catch (\Throwable $exception) {
+            $metadata = [
+                ...($document->metadata ?? []),
+                'classification' => [
+                    'document_type' => $document->document_type->value,
+                    'confidence' => 'low',
+                    'needs_review' => true,
+                ],
+            ];
+
+            $document->forceFill(['metadata' => $metadata])->save();
+
             $record = $document->lead->extractedData()->updateOrCreate(
                 ['lead_document_id' => $document->id],
                 [
@@ -92,36 +126,68 @@ class ExtractionService
         }
     }
 
-    protected function supports(DocumentType $documentType): bool
+    protected function normalizeClassification(array $classification, array $fields, ?string $rawText = null, ?string $summary = null): array
     {
-        return in_array($documentType, [DocumentType::IC, DocumentType::PAYSLIP], true);
-    }
+        $documentType = DocumentType::tryFrom((string) ($classification['document_type'] ?? '')) ?? DocumentType::OTHER;
 
-    protected function storeUnsupportedResult(LeadDocument $document)
-    {
-        return $document->lead->extractedData()->updateOrCreate(
-            ['lead_document_id' => $document->id],
-            [
-                'document_type' => $document->document_type,
-                'extracted_summary' => 'Prototype extraction currently supports IC and payslip documents only.',
-                'structured_fields' => [
-                    'supported_in_prototype' => false,
-                ],
-                'extraction_status' => ExtractionStatus::REVIEW_REQUIRED,
-                'extracted_at' => now(),
-            ]
-        );
+        if ($documentType !== DocumentType::IC) {
+            return $classification;
+        }
+
+        $side = $classification['ic_side'] ?? null;
+        $hasFullName = filled($fields['full_name'] ?? null);
+        $hasDob = filled($fields['date_of_birth'] ?? null);
+        $text = strtolower(trim(implode(' ', array_filter([$rawText, $summary]))));
+        $hasAddress = filled($fields['address'] ?? null);
+        $hasBackMarkers = str_contains($text, 'touch n go')
+            || str_contains($text, 'touchngo')
+            || str_contains($text, '80k chip')
+            || str_contains($text, 'chip')
+            || str_contains($text, 'ketua pengarah pendaftaran negara')
+            || str_contains($text, 'pendaftaran negara');
+        $looksLikeBack = ($hasBackMarkers && ! $hasFullName && ! $hasDob)
+            || ($hasAddress && ! $hasFullName);
+
+        if (! in_array($side, ['front', 'back'], true)) {
+            if ($hasFullName) {
+                $classification['ic_side'] = 'front';
+            } elseif ($looksLikeBack) {
+                $classification['ic_side'] = 'back';
+            }
+
+            return $classification;
+        }
+
+        if ($side === 'front' && ! $hasFullName && $looksLikeBack) {
+            $classification['ic_side'] = 'back';
+        }
+
+        if ($side === 'back' && $hasFullName && ! $hasBackMarkers) {
+            $classification['ic_side'] = 'front';
+        }
+
+        return $classification;
     }
 
     protected function storeUnavailableResult(LeadDocument $document)
     {
+        $metadata = [
+            ...($document->metadata ?? []),
+            'classification' => [
+                'document_type' => $document->document_type->value,
+                'confidence' => 'low',
+                'needs_review' => true,
+            ],
+        ];
+
+        $document->forceFill(['metadata' => $metadata])->save();
+
         return $document->lead->extractedData()->updateOrCreate(
             ['lead_document_id' => $document->id],
             [
                 'document_type' => $document->document_type,
                 'extracted_summary' => 'Gemini is not configured. Manual review is required until GEMINI_API_KEY is set.',
                 'structured_fields' => [
-                    'supported_in_prototype' => true,
                     'ai_configured' => false,
                 ],
                 'extraction_status' => ExtractionStatus::REVIEW_REQUIRED,

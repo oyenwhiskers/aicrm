@@ -8,6 +8,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\RunLeadCalculationRequest;
 use App\Models\Lead;
 use App\Services\CalculationService;
+use App\Services\LeadCompletenessService;
 use App\Services\LeadStageService;
 use Illuminate\Http\JsonResponse;
 
@@ -17,8 +18,18 @@ class LeadProcessingController extends Controller
         RunLeadCalculationRequest $request,
         Lead $lead,
         CalculationService $calculationService,
+        LeadCompletenessService $leadCompletenessService,
         LeadStageService $leadStageService,
     ): JsonResponse {
+        $lead->loadMissing('documents');
+        $completeness = $leadCompletenessService->summarize($lead);
+
+        if (! $completeness['is_complete']) {
+            return response()->json([
+                'message' => 'Complete all required documents before running calculation.',
+            ], 422);
+        }
+
         $leadStageService->transition($lead, LeadStage::PROCESSING, 'Calculation started.');
 
         $result = $calculationService->calculate($lead, $request->validated());

@@ -3,7 +3,6 @@
 namespace App\Models;
 
 use App\Enums\LeadStage;
-use Illuminate\Database\Eloquent\Attributes\Cast;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -22,19 +21,11 @@ class LeadStageHistory extends Model
 
     public $timestamps = false;
 
-    protected function oldStage(): Cast
-    {
-        return Cast::of(LeadStage::class);
-    }
-
-    protected function newStage(): Cast
-    {
-        return Cast::of(LeadStage::class);
-    }
-
     protected function casts(): array
     {
         return [
+            'old_stage' => LeadStage::class,
+            'new_stage' => LeadStage::class,
             'changed_at' => 'datetime',
         ];
     }

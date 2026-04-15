@@ -16,6 +16,12 @@ class LeadBankMatchController extends Controller
         BankMatchingService $bankMatchingService,
         LeadStageService $leadStageService,
     ): JsonResponse {
+        if (! $lead->calculationResults()->exists()) {
+            return response()->json([
+                'message' => 'Run calculation before starting bank matching.',
+            ], 422);
+        }
+
         $result = $bankMatchingService->match($lead);
 
         $nextStage = LeadStage::NOT_ELIGIBLE;

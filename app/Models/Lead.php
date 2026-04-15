@@ -3,7 +3,7 @@
 namespace App\Models;
 
 use App\Enums\LeadStage;
-use Illuminate\Database\Eloquent\Attributes\Cast;
+use App\Enums\UploadStatus;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -21,9 +21,11 @@ class Lead extends Model
 {
     use HasFactory;
 
-    protected function stage(): Cast
+    protected function casts(): array
     {
-        return Cast::of(LeadStage::class);
+        return [
+            'stage' => LeadStage::class,
+        ];
     }
 
     public function profile(): HasOne
@@ -33,12 +35,14 @@ class Lead extends Model
 
     public function documents(): HasMany
     {
-        return $this->hasMany(LeadDocument::class);
+        return $this->hasMany(LeadDocument::class)
+            ->where('upload_status', '!=', UploadStatus::DELETING->value);
     }
 
     public function extractedData(): HasMany
     {
-        return $this->hasMany(LeadExtractedData::class);
+        return $this->hasMany(LeadExtractedData::class)
+            ->whereHas('document', fn ($query) => $query->where('upload_status', '!=', UploadStatus::DELETING->value));
     }
 
     public function calculationResults(): HasMany

@@ -17,6 +17,7 @@ class UploadLeadDocumentRequest extends FormRequest
     {
         return [
             'document_type' => ['required', Rule::in(array_column(DocumentType::cases(), 'value'))],
+            'document_slot' => ['nullable', Rule::in(DocumentType::allowedUploadSlots())],
             'file' => ['required', 'file', 'max:10240'],
         ];
     }

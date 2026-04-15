@@ -4,7 +4,6 @@ namespace App\Models;
 
 use App\Enums\DocumentType;
 use App\Enums\ExtractionStatus;
-use Illuminate\Database\Eloquent\Attributes\Cast;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -23,19 +22,11 @@ class LeadExtractedData extends Model
 {
     use HasFactory;
 
-    protected function documentType(): Cast
-    {
-        return Cast::of(DocumentType::class);
-    }
-
-    protected function extractionStatus(): Cast
-    {
-        return Cast::of(ExtractionStatus::class);
-    }
-
     protected function casts(): array
     {
         return [
+            'document_type' => DocumentType::class,
+            'extraction_status' => ExtractionStatus::class,
             'structured_fields' => 'array',
             'extracted_at' => 'datetime',
         ];

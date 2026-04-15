@@ -4,7 +4,6 @@ namespace App\Models;
 
 use App\Enums\DocumentType;
 use App\Enums\UploadStatus;
-use Illuminate\Database\Eloquent\Attributes\Cast;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -25,19 +24,11 @@ class LeadDocument extends Model
 {
     use HasFactory;
 
-    protected function documentType(): Cast
-    {
-        return Cast::of(DocumentType::class);
-    }
-
-    protected function uploadStatus(): Cast
-    {
-        return Cast::of(UploadStatus::class);
-    }
-
     protected function casts(): array
     {
         return [
+            'document_type' => DocumentType::class,
+            'upload_status' => UploadStatus::class,
             'uploaded_at' => 'datetime',
             'metadata' => 'array',
         ];

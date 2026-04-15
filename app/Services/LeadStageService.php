@@ -37,6 +37,10 @@ class LeadStageService
             return $this->transition($lead, LeadStage::DOC_PARTIAL, 'Some required prototype documents received.');
         }
 
+        if (in_array($lead->stage, [LeadStage::DOC_REQUESTED, LeadStage::DOC_PARTIAL, LeadStage::DOC_COMPLETE], true)) {
+            return $this->transition($lead, LeadStage::DOC_REQUESTED, 'No required prototype documents currently uploaded.');
+        }
+
         return $lead;
     }
 }

@@ -5,11 +5,24 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\ImportLeadsRequest;
 use App\Http\Requests\StoreLeadRequest;
+use App\Enums\CalculationStatus;
+use App\Enums\DocumentType;
+use App\Enums\EligibilityStatus;
+use App\Enums\ExtractionStatus;
 use App\Models\Lead;
+use App\Models\LeadDocument;
+use App\Enums\LeadStage;
+use App\Enums\MatchStatus;
+use App\Enums\UploadStatus;
 use App\Services\LeadCompletenessService;
 use App\Services\LeadService;
+use BackedEnum;
+use Carbon\Carbon;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Storage;
+use Throwable;
 
 class LeadController extends Controller
 {
@@ -22,6 +35,7 @@ class LeadController extends Controller
     {
         $perPage = min($request->integer('per_page', 15), 100);
         $search = $request->string('search')->toString();
+        $date = $request->string('date')->toString();
 
         $leads = Lead::query()
             ->with(['profile'])
@@ -29,6 +43,14 @@ class LeadController extends Controller
             ->when(
                 $request->filled('stage'),
                 fn ($query) => $query->where('stage', $request->string('stage')->toString())
+            )
+            ->when(
+                $request->boolean('recent'),
+                fn ($query) => $query->where('created_at', '>=', Carbon::now()->subMinutes(15))
+            )
+            ->when(
+                $date !== '',
+                fn ($query) => $query->whereDate('created_at', $date)
             )
             ->when($search !== '', function ($query) use ($search) {
                 $query->where(function ($subQuery) use ($search) {
@@ -56,16 +78,45 @@ class LeadController extends Controller
 
     public function import(ImportLeadsRequest $request, LeadService $leadService): JsonResponse
     {
-        $result = $leadService->import($request->validated('rows'));
+        try {
+            $result = $leadService->import($request->validated('rows'));
 
-        return response()->json([
-            'data' => [
-                'created_count' => $result['created']->count(),
-                'duplicate_count' => $result['duplicates']->count(),
-                'created' => $result['created']->map(fn (Lead $lead) => $this->transformSummary($lead))->values(),
-                'duplicates' => $result['duplicates']->values(),
-            ],
-        ], 201);
+            return response()->json([
+                'data' => [
+                    'created_count' => $result['created']->count(),
+                    'duplicate_count' => $result['duplicates']->count(),
+                    'created' => $result['created']->map(fn (Lead $lead) => $this->transformSummary($lead))->values(),
+                    'duplicates' => $result['duplicates']->values(),
+                ],
+            ], 201);
+        } catch (QueryException $exception) {
+            report($exception);
+
+            return response()->json([
+                'message' => $this->databaseImportErrorMessage($exception),
+            ], 503);
+        } catch (Throwable $exception) {
+            report($exception);
+
+            if (str_contains($exception->getMessage(), 'Maximum execution time')) {
+                return response()->json([
+                    'message' => 'Lead import failed because the database did not respond in time. Check the MySQL connection and try again.',
+                ], 503);
+            }
+
+            throw $exception;
+        }
+    }
+
+    protected function databaseImportErrorMessage(QueryException $exception): string
+    {
+        $message = $exception->getMessage();
+
+        if (str_contains($message, 'SQLSTATE[HY000] [2002]')) {
+            return 'Lead import failed because the MySQL server could not be reached. Check the database connection and try again.';
+        }
+
+        return 'Lead import failed because the database is unavailable right now. Try again in a moment.';
     }
 
     public function show(Lead $lead): JsonResponse
@@ -85,6 +136,23 @@ class LeadController extends Controller
         ]);
     }
 
+    public function destroy(Lead $lead): JsonResponse
+    {
+        $lead->loadMissing('documents');
+
+        foreach ($lead->documents as $document) {
+            if (filled($document->storage_disk) && filled($document->storage_path)) {
+                Storage::disk($document->storage_disk)->delete($document->storage_path);
+            }
+        }
+
+        $lead->delete();
+
+        return response()->json([
+            'message' => 'Lead deleted successfully.',
+        ]);
+    }
+
     protected function transformSummary(Lead $lead): array
     {
         return [
@@ -93,7 +161,7 @@ class LeadController extends Controller
             'phone_number' => $lead->phone_number,
             'ic_number' => $lead->ic_number,
             'source' => $lead->source,
-            'stage' => $lead->stage->value,
+            'stage' => $this->enumValue($lead->stage, LeadStage::class),
             'documents_count' => $lead->documents_count ?? $lead->documents()->count(),
             'created_at' => $lead->created_at?->toIso8601String(),
             'updated_at' => $lead->updated_at?->toIso8601String(),
@@ -103,6 +171,11 @@ class LeadController extends Controller
     protected function transformDetail(Lead $lead): array
     {
         $completeness = $this->leadCompletenessService->summarize($lead);
+        $assignmentKeys = $this->leadCompletenessService->documentAssignmentKeys($lead);
+        $activeJobCount = LeadDocument::query()
+            ->where('lead_id', $lead->id)
+            ->whereIn('upload_status', [UploadStatus::QUEUED->value, UploadStatus::PROCESSING->value, UploadStatus::DELETING->value])
+            ->count();
 
         return [
             'id' => $lead->id,
@@ -110,7 +183,7 @@ class LeadController extends Controller
             'phone_number' => $lead->phone_number,
             'ic_number' => $lead->ic_number,
             'source' => $lead->source,
-            'stage' => $lead->stage->value,
+            'stage' => $this->enumValue($lead->stage, LeadStage::class),
             'profile' => [
                 'employer' => $lead->profile?->employer,
                 'sector' => $lead->profile?->sector,
@@ -126,23 +199,30 @@ class LeadController extends Controller
                 'has_legal_or_saa_issue' => $lead->profile?->has_legal_or_saa_issue,
             ],
             'document_completeness' => $completeness,
+            'has_processing_documents' => $activeJobCount > 0,
+            'active_job_count' => $activeJobCount,
             'documents' => $lead->documents->map(fn ($document) => [
                 'id' => $document->id,
-                'document_type' => $document->document_type->value,
+                'document_type' => $this->enumValue($document->document_type, DocumentType::class),
                 'original_filename' => $document->original_filename,
                 'storage_disk' => $document->storage_disk,
                 'storage_path' => $document->storage_path,
-                'upload_status' => $document->upload_status->value,
+                'upload_status' => $this->enumValue($document->upload_status, UploadStatus::class),
                 'uploaded_at' => $document->uploaded_at?->toIso8601String(),
                 'metadata' => $document->metadata,
+                'classification' => data_get($document->metadata, 'classification'),
+                'manual_assignment_key' => data_get($document->metadata, 'manual_assignment_key'),
+                'assigned_checklist_key' => $assignmentKeys[$document->id] ?? null,
+                'manual_review_resolved' => (bool) data_get($document->metadata, 'manual_review_resolved', false),
+                'effective_document_type' => data_get($document->metadata, 'effective_document_type'),
             ])->values(),
             'extracted_data' => $lead->extractedData->map(fn ($item) => [
                 'id' => $item->id,
                 'document_id' => $item->lead_document_id,
-                'document_type' => $item->document_type->value,
+                'document_type' => $this->enumValue($item->document_type, DocumentType::class),
                 'summary' => $item->extracted_summary,
                 'structured_fields' => $item->structured_fields,
-                'status' => $item->extraction_status->value,
+                'status' => $this->enumValue($item->extraction_status, ExtractionStatus::class),
                 'extracted_at' => $item->extracted_at?->toIso8601String(),
             ])->values(),
             'calculation_results' => $lead->calculationResults->map(fn ($result) => [
@@ -153,8 +233,8 @@ class LeadController extends Controller
                 'allowed_financing_amount' => $result->allowed_financing_amount,
                 'installment' => $result->installment,
                 'payout_result' => $result->payout_result,
-                'eligibility_status' => $result->eligibility_status->value,
-                'calculation_status' => $result->calculation_status->value,
+                'eligibility_status' => $this->enumValue($result->eligibility_status, EligibilityStatus::class),
+                'calculation_status' => $this->enumValue($result->calculation_status, CalculationStatus::class),
                 'processed_at' => $result->processed_at?->toIso8601String(),
                 'result_breakdown' => $result->result_breakdown,
             ])->values(),
@@ -165,7 +245,7 @@ class LeadController extends Controller
                     'name' => $match->bank?->name,
                     'code' => $match->bank?->code,
                 ],
-                'match_status' => $match->match_status->value,
+                'match_status' => $this->enumValue($match->match_status, MatchStatus::class),
                 'match_reason' => $match->match_reason,
                 'priority' => $match->priority,
                 'matched_at' => $match->matched_at?->toIso8601String(),
@@ -179,13 +259,30 @@ class LeadController extends Controller
             ])->values(),
             'stage_history' => $lead->stageHistories->map(fn ($history) => [
                 'id' => $history->id,
-                'old_stage' => $history->old_stage?->value,
-                'new_stage' => $history->new_stage->value,
+                'old_stage' => $this->enumValue($history->old_stage, LeadStage::class),
+                'new_stage' => $this->enumValue($history->new_stage, LeadStage::class),
                 'note' => $history->note,
                 'changed_at' => $history->changed_at?->toIso8601String(),
             ])->values(),
             'created_at' => $lead->created_at?->toIso8601String(),
             'updated_at' => $lead->updated_at?->toIso8601String(),
         ];
+    }
+
+    protected function enumValue(mixed $value, string $enumClass): ?string
+    {
+        if ($value instanceof BackedEnum) {
+            return (string) $value->value;
+        }
+
+        if ($value === null) {
+            return null;
+        }
+
+        if (is_string($value) || is_int($value)) {
+            return $enumClass::tryFrom($value)?->value ?? (string) $value;
+        }
+
+        return (string) $value;
     }
 }

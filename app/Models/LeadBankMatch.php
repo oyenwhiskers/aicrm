@@ -3,7 +3,6 @@
 namespace App\Models;
 
 use App\Enums\MatchStatus;
-use Illuminate\Database\Eloquent\Attributes\Cast;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -21,14 +20,10 @@ class LeadBankMatch extends Model
 {
     use HasFactory;
 
-    protected function matchStatus(): Cast
-    {
-        return Cast::of(MatchStatus::class);
-    }
-
     protected function casts(): array
     {
         return [
+            'match_status' => MatchStatus::class,
             'matched_at' => 'datetime',
         ];
     }
