@@ -2,7 +2,7 @@ FROM composer:2 AS vendor
 
 WORKDIR /app
 
-COPY composer.json composer.lock* ./
+COPY . .
 
 RUN composer install \
     --no-dev \
@@ -28,47 +28,42 @@ COPY postcss.config.js* ./
 RUN npm run build
 
 
-FROM php:8.3-apache AS app
+FROM php:8.3-cli-alpine AS app
 
-WORKDIR /var/www/html
+WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        git \
-        unzip \
-        libzip-dev \
+RUN apk add --no-cache \
+        fcgi \
+        freetype-dev \
+        icu-dev \
+        libjpeg-turbo-dev \
         libpng-dev \
-        libjpeg62-turbo-dev \
-        libfreetype6-dev \
-        libonig-dev \
-        libicu-dev \
+        libzip-dev \
+        oniguruma-dev \
+        unzip \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j"$(nproc)" \
         bcmath \
-        gd \
-        mbstring \
-        pdo_mysql \
-        zip \
         exif \
+        gd \
         intl \
+        mbstring \
         opcache \
-    && a2enmod rewrite \
-    && rm -rf /var/lib/apt/lists/*
-
-ENV APACHE_DOCUMENT_ROOT=/var/www/html/public
-
-RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf \
-    && sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf
+        pdo_mysql \
+        zip
 
 COPY . .
 COPY --from=vendor /app/vendor ./vendor
 COPY --from=frontend /app/public/build ./public/build
 
 RUN mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache \
-    && chown -R www-data:www-data storage bootstrap/cache \
+    && chown -R nobody:nobody storage bootstrap/cache \
     && chmod -R ug+rwx storage bootstrap/cache \
-    && ln -sfn /var/www/html/storage/app/public /var/www/html/public/storage
+    && ln -sfn /app/storage/app/public /app/public/storage
 
-EXPOSE 80
+ENV APP_ENV=production
+ENV PORT=8080
 
-CMD ["apache2-foreground"]
+EXPOSE 8080
+
+CMD ["sh", "-c", "php artisan serve --host=0.0.0.0 --port=${PORT}"]
