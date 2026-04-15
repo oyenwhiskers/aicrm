@@ -1,0 +1,15 @@
+.git
+.gitignore
+node_modules
+vendor
+.env
+.env.*
+storage/app/*
+storage/framework/*
+storage/logs/*
+!storage/framework/.gitignore
+bootstrap/cache/*.php
+public/storage
+tests
+docker-compose.yml
+README.md
