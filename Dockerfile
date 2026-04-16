@@ -18,7 +18,7 @@ FROM node:22-alpine AS frontend
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
 COPY resources ./resources
 COPY public ./public
@@ -85,4 +85,4 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "php artisan serve --host=0.0.0.0 --port=${PORT} & php artisan queue:work --max-jobs=1000 --max-time=3600"]
+CMD ["sh", "-c", "php artisan serve --host=0.0.0.0 --port=${PORT}"]
