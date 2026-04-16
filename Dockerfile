@@ -56,6 +56,8 @@ COPY . .
 COPY --from=vendor /app/vendor ./vendor
 COPY --from=frontend /app/public/build ./public/build
 
+RUN test -f /app/public/build/manifest.json
+
 RUN mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache \
     && chown -R nobody:nobody storage bootstrap/cache \
     && chmod -R ug+rwx storage bootstrap/cache \
