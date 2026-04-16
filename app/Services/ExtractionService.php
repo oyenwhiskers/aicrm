@@ -20,7 +20,7 @@ class ExtractionService
     {
         $document->loadMissing('lead.profile');
 
-        if (blank(config('services.gemini.api_key'))) {
+        if (blank(config('services.openai.api_key'))) {
             return $this->storeUnavailableResult($document);
         }
 
@@ -186,7 +186,7 @@ class ExtractionService
             ['lead_document_id' => $document->id],
             [
                 'document_type' => $document->document_type,
-                'extracted_summary' => 'Gemini is not configured. Manual review is required until GEMINI_API_KEY is set.',
+                'extracted_summary' => 'AI service is not configured. Manual review is required until OPENAI_API_KEY is set.',
                 'structured_fields' => [
                     'ai_configured' => false,
                 ],
