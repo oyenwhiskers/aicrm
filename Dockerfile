@@ -29,19 +29,27 @@ COPY postcss.config.js* ./
 RUN npm run build
 
 
+# Use official image that has extensions pre-compiled to avoid per-deploy compilation
 FROM php:8.4-cli-alpine AS app
 
 WORKDIR /app
 
+# Install only runtime libs (not *-dev headers) + compile extensions in one layer
+# Cache-friendly: this layer only rebuilds if PHP version changes
 RUN apk add --no-cache \
-        fcgi \
+        freetype \
+        icu-libs \
+        libjpeg-turbo \
+        libpng \
+        libzip \
+        oniguruma \
+        unzip \
         freetype-dev \
         icu-dev \
         libjpeg-turbo-dev \
         libpng-dev \
         libzip-dev \
         oniguruma-dev \
-        unzip \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j"$(nproc)" \
         bcmath \
@@ -51,11 +59,20 @@ RUN apk add --no-cache \
         mbstring \
         opcache \
         pdo_mysql \
-        zip
+        zip \
+    && apk del --no-cache \
+        freetype-dev \
+        icu-dev \
+        libjpeg-turbo-dev \
+        libpng-dev \
+        libzip-dev \
+        oniguruma-dev
 
-COPY . .
+# Copy app source — order matters for layer caching:
+# vendor changes rarely → copy first; app code changes often → copy last
 COPY --from=vendor /app/vendor ./vendor
 COPY --from=frontend /app/public/build ./public/build
+COPY . .
 
 RUN test -f /app/public/build/manifest.json \
     && mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache \
