@@ -6,6 +6,7 @@ RUN composer install \
     --no-dev \
     --no-interaction \
     --no-progress \
+    --no-scripts \
     --prefer-dist \
     --optimize-autoloader
 
