@@ -17,28 +17,24 @@ class LeadExtractionWorkflowTest extends TestCase
     public function test_it_extracts_ic_document_and_updates_lead_profile_fields(): void
     {
         Storage::fake('public');
-        config()->set('services.gemini.api_key', 'test-key');
+        config()->set('services.openai.api_key', 'test-key');
 
         Http::fake([
             '*' => Http::response([
-                'candidates' => [
+                'choices' => [
                     [
-                        'content' => [
-                            'parts' => [
-                                [
-                                    'text' => json_encode([
-                                        'summary' => 'IC extracted successfully.',
-                                        'confidence' => 'high',
-                                        'needs_review' => false,
-                                        'fields' => [
-                                            'full_name' => 'Jane Doe',
-                                            'ic_number' => '900101101234',
-                                            'date_of_birth' => '1990-01-01',
-                                            'address' => 'Kuala Lumpur',
-                                        ],
-                                    ], JSON_THROW_ON_ERROR),
+                        'message' => [
+                            'content' => json_encode([
+                                'summary' => 'IC extracted successfully.',
+                                'confidence' => 'high',
+                                'needs_review' => false,
+                                'fields' => [
+                                    'full_name' => 'Jane Doe',
+                                    'ic_number' => '900101101234',
+                                    'date_of_birth' => '1990-01-01',
+                                    'address' => 'Kuala Lumpur',
                                 ],
-                            ],
+                            ], JSON_THROW_ON_ERROR),
                         ],
                     ],
                 ],
@@ -73,10 +69,10 @@ class LeadExtractionWorkflowTest extends TestCase
         ]);
     }
 
-    public function test_it_marks_supported_documents_for_manual_review_when_gemini_is_not_configured(): void
+    public function test_it_marks_supported_documents_for_manual_review_when_openai_is_not_configured(): void
     {
         Storage::fake('public');
-        config()->set('services.gemini.api_key', null);
+        config()->set('services.openai.api_key', null);
 
         $lead = Lead::query()->create([
             'name' => 'No AI Lead',

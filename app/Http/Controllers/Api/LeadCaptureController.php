@@ -44,8 +44,8 @@ class LeadCaptureController extends Controller
         $apiMessage = data_get($payload, 'error.message');
 
         return match ($status) {
-            401, 403 => 'Gemini rejected the API key. Check GEMINI_API_KEY and Gemini API access.',
-            429 => 'Gemini rate limit or quota was reached. Wait a moment or use a key with available quota.',
+            401, 403 => 'OpenAI rejected the API key. Check OPENAI_API_KEY and OpenAI API access.',
+            429 => 'OpenAI rate limit or quota was reached. Wait a moment or use a key with available quota.',
             default => $apiMessage ?: $exception->getMessage(),
         };
     }
