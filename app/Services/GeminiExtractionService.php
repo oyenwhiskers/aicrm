@@ -47,32 +47,40 @@ class GeminiExtractionService
         try {
             $response = Http::timeout(60)
                 ->withOptions([
-                    'verify' => (bool) config('services.gemini.verify_ssl', true),
+                    'verify' => (bool) config('services.openai.verify_ssl', true),
+                ])
+                ->withHeaders([
+                    'Authorization' => 'Bearer ' . config('services.openai.api_key'),
                 ])
                 ->acceptJson()
                 ->post($this->endpoint(), [
-                    'contents' => [
+                    'model' => config('services.openai.model', 'gpt-4-vision'),
+                    'messages' => [
                         [
-                            'parts' => [
-                                ['text' => $prompt],
+                            'role' => 'user',
+                            'content' => [
                                 [
-                                    'inline_data' => [
-                                        'mime_type' => $mimeType ?? 'application/octet-stream',
-                                        'data' => $base64Payload,
+                                    'type' => 'text',
+                                    'text' => $prompt,
+                                ],
+                                [
+                                    'type' => 'image_url',
+                                    'image_url' => [
+                                        'url' => 'data:' . ($mimeType ?? 'application/octet-stream') . ';base64,' . $base64Payload,
                                     ],
                                 ],
                             ],
                         ],
                     ],
-                    'generationConfig' => [
-                        'temperature' => 0.1,
-                        'responseMimeType' => 'application/json',
+                    'temperature' => 0.1,
+                    'response_format' => [
+                        'type' => 'json_object',
                     ],
                 ]);
         } catch (ConnectionException $exception) {
             if (str_contains($exception->getMessage(), 'cURL error 60')) {
                 throw new RuntimeException(
-                    'Gemini SSL verification failed on this machine. Set GEMINI_VERIFY_SSL=false for local development or install a valid CA bundle for PHP.',
+                    'OpenAI SSL verification failed on this machine. Set OPENAI_VERIFY_SSL=false for local development or install a valid CA bundle for PHP.',
                     previous: $exception,
                 );
             }
@@ -82,14 +90,10 @@ class GeminiExtractionService
 
         $response->throw();
 
-        $text = collect(Arr::get($response->json(), 'candidates', []))
-            ->flatMap(fn (array $candidate) => Arr::get($candidate, 'content.parts', []))
-            ->pluck('text')
-            ->filter()
-            ->implode("\n");
+        $text = Arr::get($response->json(), 'choices.0.message.content', '');
 
         if ($text === '') {
-            throw new RuntimeException('Gemini returned an empty extraction response.');
+            throw new RuntimeException('OpenAI returned an empty extraction response.');
         }
 
         $decoded = $this->decodeJson($text);
@@ -100,15 +104,14 @@ class GeminiExtractionService
 
     protected function endpoint(): string
     {
-        $baseUrl = rtrim((string) config('services.gemini.base_url'), '/');
-        $model = config('services.gemini.model');
-        $apiKey = config('services.gemini.api_key');
+        $baseUrl = rtrim((string) config('services.openai.base_url'), '/');
+        $apiKey = config('services.openai.api_key');
 
         if (blank($apiKey)) {
-            throw new RuntimeException('Gemini API key is not configured.');
+            throw new RuntimeException('OpenAI API key is not configured.');
         }
 
-        return "{$baseUrl}/models/{$model}:generateContent?key={$apiKey}";
+        return "{$baseUrl}/chat/completions";
     }
 
         protected function documentWorkflowPrompt(): string
@@ -197,7 +200,7 @@ PROMPT;
         $decoded = json_decode($trimmed, true);
 
         if (! is_array($decoded)) {
-            throw new RuntimeException('Gemini returned invalid JSON payload.');
+            throw new RuntimeException('AI service returned invalid JSON payload.');
         }
 
         return $decoded;

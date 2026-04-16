@@ -112,7 +112,7 @@ To convert uploaded documents into structured data automatically.
 Every time a document is uploaded.
 
 ### Process
-- document is sent to AI (Gemini)
+- document is sent to AI (OpenAI ChatGPT)
 - AI extracts relevant information depending on document type
 
 ### Examples
