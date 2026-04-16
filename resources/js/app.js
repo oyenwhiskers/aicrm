@@ -146,7 +146,9 @@ if (appRoot) {
             return;
         }
 
-        if (leadHasActiveDocumentJobs()) {
+        const hasActiveJobs = Number(state.selectedLead.active_job_count || 0) > 0 || leadHasActiveDocumentJobs();
+
+        if (hasActiveJobs) {
             leadStatusPollTimeoutId = window.setTimeout(() => {
                 loadLeadDocumentStatus(state.selectedLeadId);
             }, 2000);
@@ -654,14 +656,13 @@ if (appRoot) {
         render();
 
         try {
-            const payload = await apiRequest(`/leads/${state.selectedLeadId}/documents/${documentId}`, {
+            await apiRequest(`/leads/${state.selectedLeadId}/documents/${documentId}`, {
                 method: 'DELETE',
             });
 
-            applyLeadStatusPayload(payload.data);
             pendingLeadListRefresh = true;
             pushNotice('Document queued for background deletion.');
-            syncLeadStatusPolling();
+            await loadLeadDocumentStatus(state.selectedLeadId);
         } catch (error) {
             pushNotice(error.message, 'error');
         } finally {
@@ -694,24 +695,16 @@ if (appRoot) {
         render();
 
         try {
-            const responses = await Promise.all(
+            await Promise.all(
                 selectedIds.map((documentId) => apiRequest(`/leads/${state.selectedLeadId}/documents/${documentId}`, {
                     method: 'DELETE',
                 }))
             );
 
-            const latestPayload = responses[responses.length - 1]?.data;
-
-            if (latestPayload) {
-                applyLeadStatusPayload(latestPayload);
-            } else {
-                await loadLeadDocumentStatus(state.selectedLeadId);
-            }
-
             state.selectedDocumentIds = [];
             pendingLeadListRefresh = true;
             pushNotice(`Queued ${selectedIds.length} document${selectedIds.length === 1 ? '' : 's'} for background deletion.`);
-            syncLeadStatusPolling();
+            await loadLeadDocumentStatus(state.selectedLeadId);
         } catch (error) {
             pushNotice(error.message, 'error');
         } finally {
