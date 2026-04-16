@@ -1,9 +1,7 @@
 FROM composer:2 AS vendor
 
 WORKDIR /app
-
-COPY . .
-
+COPY composer.json composer.lock* ./
 RUN composer install \
     --no-dev \
     --no-interaction \
@@ -11,11 +9,13 @@ RUN composer install \
     --prefer-dist \
     --optimize-autoloader
 
+COPY . .
+RUN composer dump-autoload --optimize
+
 
 FROM node:22-alpine AS frontend
 
 WORKDIR /app
-
 COPY package.json package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
@@ -56,9 +56,8 @@ COPY . .
 COPY --from=vendor /app/vendor ./vendor
 COPY --from=frontend /app/public/build ./public/build
 
-RUN test -f /app/public/build/manifest.json
-
-RUN mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache \
+RUN test -f /app/public/build/manifest.json \
+    && mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views storage/logs bootstrap/cache \
     && chown -R nobody:nobody storage bootstrap/cache \
     && chmod -R ug+rwx storage bootstrap/cache \
     && ln -sfn /app/storage/app/public /app/public/storage
@@ -68,4 +67,4 @@ ENV PORT=8080
 
 EXPOSE 8080
 
-CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8080"]
+CMD ["sh", "-c", "php artisan optimize:clear && php artisan serve --host=0.0.0.0 --port=8080"]
