@@ -19,6 +19,7 @@ class ProcessLeadDocumentJob implements ShouldQueue
     public function __construct(
         public int $documentId,
     ) {
+        $this->onQueue(config('queue.workloads.documents', 'documents'));
     }
 
     public function handle(ExtractionService $extractionService, ActivityLogService $activityLogService): void

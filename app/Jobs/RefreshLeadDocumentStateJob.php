@@ -18,6 +18,7 @@ class RefreshLeadDocumentStateJob implements ShouldQueue, ShouldBeUnique
     public function __construct(
         public int $leadId,
     ) {
+        $this->onQueue(config('queue.workloads.documents', 'documents'));
     }
 
     public function uniqueId(): string

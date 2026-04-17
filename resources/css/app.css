@@ -325,12 +325,18 @@ textarea {
 .crm-queue-item {
     display: flex;
     justify-content: space-between;
-    align-items: center;
+    align-items: flex-start;
     gap: 12px;
     padding: 12px 14px;
     border-radius: 14px;
     border: 1px solid rgba(182, 138, 53, 0.12);
     background: #fffdf9;
+}
+
+.crm-queue-item-main {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
 }
 
 .crm-queue-item strong {
@@ -344,6 +350,59 @@ textarea {
     color: var(--crm-muted);
     font-size: 0.86rem;
     text-transform: capitalize;
+}
+
+.crm-queue-progress {
+    display: grid;
+    gap: 6px;
+    margin-top: 2px;
+}
+
+.crm-queue-stage-block {
+    display: grid;
+    gap: 6px;
+}
+
+.crm-queue-stage-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.crm-badge--current {
+    outline: 1px solid rgba(17, 17, 17, 0.14);
+    outline-offset: 1px;
+}
+
+.crm-queue-error {
+    color: var(--crm-danger);
+    font-size: 0.82rem;
+    line-height: 1.35;
+    text-transform: none;
+}
+
+.crm-intake-performance-card {
+    display: grid;
+    gap: 10px;
+    margin-top: 10px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid rgba(182, 138, 53, 0.14);
+    background: rgba(255, 252, 247, 0.9);
+}
+
+.crm-intake-performance-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.crm-intake-performance-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .crm-intake-overlay {

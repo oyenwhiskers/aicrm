@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Storage;
 
 class LeadCaptureService
 {
@@ -13,10 +14,28 @@ class LeadCaptureService
 
     public function extractFromImage(UploadedFile $image, ?string $source = null): array
     {
-        $payload = base64_encode($image->get());
+        return $this->extractFromBinary(
+            $image->getMimeType(),
+            $image->get(),
+            $source,
+        );
+    }
+
+    public function extractFromStoredImage(string $disk, string $path, ?string $mimeType = null, ?string $source = null): array
+    {
+        return $this->extractFromBinary(
+            $mimeType,
+            Storage::disk($disk)->get($path),
+            $source,
+        );
+    }
+
+    protected function extractFromBinary(?string $mimeType, string $binaryPayload, ?string $source = null): array
+    {
+        $payload = base64_encode($binaryPayload);
 
         $result = $this->geminiExtractionService->extractLeadCaptureImage(
-            $image->getMimeType(),
+            $mimeType,
             $payload,
         );
 

@@ -59,6 +59,7 @@ class LeadDocumentController extends Controller
 
         $batch = $documents->isNotEmpty()
             ? Bus::batch($documents->map(fn (LeadDocument $document) => new ProcessLeadDocumentJob($document->id))->all())
+                ->onQueue(config('queue.workloads.documents', 'documents'))
                 ->name("lead-document-processing:{$lead->id}")
                 ->dispatch()
             : null;

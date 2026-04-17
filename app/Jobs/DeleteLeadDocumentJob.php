@@ -19,6 +19,7 @@ class DeleteLeadDocumentJob implements ShouldQueue
         public string $fileName,
         public string $documentType,
     ) {
+        $this->onQueue(config('queue.workloads.documents', 'documents'));
     }
 
     public function handle(DocumentService $documentService, ActivityLogService $activityLogService): void

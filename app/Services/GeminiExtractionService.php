@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Enums\DocumentType;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\RequestException;
+use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
@@ -13,7 +14,15 @@ class GeminiExtractionService
 {
     public function extract(?string $mimeType, string $base64Payload): array
     {
-        $decoded = $this->requestJson($this->documentWorkflowPrompt(), $mimeType, $base64Payload);
+        $decoded = $this->requestJson(
+            $this->documentWorkflowPrompt(),
+            $mimeType,
+            $base64Payload,
+            [
+                'model' => config('services.gemini.model'),
+                'retry_delays' => [2000, 5000, 10000],
+            ],
+        );
 
         return [
             'summary' => $decoded['summary'] ?? 'Extraction completed.',
@@ -33,7 +42,16 @@ class GeminiExtractionService
 
     public function extractLeadCaptureImage(?string $mimeType, string $base64Payload): array
     {
-        $decoded = $this->requestJson($this->leadCapturePrompt(), $mimeType, $base64Payload);
+        $decoded = $this->requestJson(
+            $this->leadCapturePrompt(),
+            $mimeType,
+            $base64Payload,
+            [
+                'model' => config('services.gemini.intake_model', config('services.gemini.model')),
+                'fallback_model' => config('services.gemini.intake_fallback_model'),
+                'retry_delays' => $this->intakeRetryDelays(),
+            ],
+        );
 
         return [
             'summary' => $decoded['summary'] ?? 'Lead image extraction completed.',
@@ -43,46 +61,97 @@ class GeminiExtractionService
         ];
     }
 
-    protected function requestJson(string $prompt, ?string $mimeType, string $base64Payload): array
+    protected function requestJson(string $prompt, ?string $mimeType, string $base64Payload, array $options = []): array
     {
+        $models = collect([
+            $options['model'] ?? config('services.gemini.model'),
+            $options['fallback_model'] ?? null,
+        ])
+            ->filter(fn ($value) => filled($value))
+            ->map(fn ($value) => trim((string) $value))
+            ->unique()
+            ->values();
+
+        $retryDelays = $options['retry_delays'] ?? [2000, 5000, 10000];
+        $lastException = null;
+
+        foreach ($models as $index => $model) {
+            try {
+                return $this->requestJsonForModel($prompt, $mimeType, $base64Payload, $model, $retryDelays);
+            } catch (
+                ConnectionException |
+                RequestException |
+                RuntimeException $exception
+            ) {
+                $lastException = $exception;
+
+                if ($index === $models->count() - 1 || ! $this->shouldFallbackToNextModel($exception)) {
+                    throw $exception;
+                }
+            }
+        }
+
+        throw $lastException ?? new RuntimeException('Gemini request did not return a response.');
+    }
+
+    protected function requestJsonForModel(string $prompt, ?string $mimeType, string $base64Payload, string $model, array $retryDelays): array
+    {
+        $response = null;
+        $lastConnectionException = null;
+
         try {
-            $response = Http::timeout(60)
-                ->withOptions([
-                    'verify' => (bool) config('services.gemini.verify_ssl', true),
-                ])
-                ->retry(3, 2000, function (\Throwable $exception): bool {
-                    if ($exception instanceof ConnectionException) {
-                        return true;
-                    }
+            $maxAttempts = count($retryDelays) + 1;
 
-                    if ($exception instanceof RequestException) {
-                        $status = $exception->response?->status();
-
-                        return in_array($status, [408, 429, 500, 502, 503, 504], true);
-                    }
-
-                    return false;
-                })
-                ->acceptJson()
-                ->post($this->endpoint(), [
-                    'contents' => [
-                        [
-                            'parts' => [
-                                ['text' => $prompt],
+            for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
+                try {
+                    $response = Http::timeout(60)
+                        ->withOptions([
+                            'verify' => (bool) config('services.gemini.verify_ssl', true),
+                        ])
+                        ->acceptJson()
+                        ->post($this->endpoint($model), [
+                            'contents' => [
                                 [
-                                    'inline_data' => [
-                                        'mime_type' => $mimeType ?? 'application/octet-stream',
-                                        'data' => $base64Payload,
+                                    'parts' => [
+                                        ['text' => $prompt],
+                                        [
+                                            'inline_data' => [
+                                                'mime_type' => $mimeType ?? 'application/octet-stream',
+                                                'data' => $base64Payload,
+                                            ],
+                                        ],
                                     ],
                                 ],
                             ],
-                        ],
-                    ],
-                    'generationConfig' => [
-                        'temperature' => 0.1,
-                        'responseMimeType' => 'application/json',
-                    ],
-                ]);
+                            'generationConfig' => [
+                                'temperature' => 0.1,
+                                'responseMimeType' => 'application/json',
+                            ],
+                        ]);
+                } catch (ConnectionException $exception) {
+                    if (str_contains($exception->getMessage(), 'cURL error 60')) {
+                        throw new RuntimeException(
+                            'Gemini SSL verification failed on this machine. Set GEMINI_VERIFY_SSL=false for local development or install a valid CA bundle for PHP.',
+                            previous: $exception,
+                        );
+                    }
+
+                    $lastConnectionException = $exception;
+
+                    if (! array_key_exists($attempt, $retryDelays)) {
+                        throw $exception;
+                    }
+
+                    usleep($retryDelays[$attempt] * 1000);
+                    continue;
+                }
+
+                if (! $this->shouldRetryResponse($response) || ! array_key_exists($attempt, $retryDelays)) {
+                    break;
+                }
+
+                usleep($retryDelays[$attempt] * 1000);
+            }
         } catch (ConnectionException $exception) {
             if (str_contains($exception->getMessage(), 'cURL error 60')) {
                 throw new RuntimeException(
@@ -92,6 +161,14 @@ class GeminiExtractionService
             }
 
             throw $exception;
+        }
+
+        if ($response === null && $lastConnectionException) {
+            throw $lastConnectionException;
+        }
+
+        if ($response === null) {
+            throw new RuntimeException('Gemini request did not return a response.');
         }
 
         if ($response->failed()) {
@@ -126,10 +203,49 @@ class GeminiExtractionService
         return $decoded;
     }
 
-    protected function endpoint(): string
+    protected function shouldRetryResponse(Response $response): bool
+    {
+        return in_array($response->status(), [408, 429, 500, 502, 503, 504], true);
+    }
+
+    protected function shouldFallbackToNextModel(
+        ConnectionException|RequestException|RuntimeException $exception,
+    ): bool {
+        if ($exception instanceof ConnectionException) {
+            return true;
+        }
+
+        if ($exception instanceof RequestException) {
+            $status = $exception->response?->status();
+
+            if (in_array($status, [408, 429, 500, 502, 503, 504], true)) {
+                return true;
+            }
+
+            if ($status === 404) {
+                $message = strtolower($exception->getMessage());
+
+                return str_contains($message, 'no longer available')
+                    || str_contains($message, 'not found')
+                    || str_contains($message, 'not supported')
+                    || str_contains($message, 'not available');
+            }
+
+            return false;
+        }
+
+        $message = strtolower($exception->getMessage());
+
+        return str_contains($message, 'high demand')
+            || str_contains($message, 'temporarily overloaded')
+            || str_contains($message, 'rate-limited')
+            || str_contains($message, 'status code 429')
+            || str_contains($message, 'status code 503');
+    }
+
+    protected function endpoint(string $model): string
     {
         $baseUrl = rtrim((string) config('services.gemini.base_url'), '/');
-        $model = config('services.gemini.model');
         $apiKey = config('services.gemini.api_key');
 
         if (blank($apiKey)) {
@@ -137,6 +253,20 @@ class GeminiExtractionService
         }
 
         return "{$baseUrl}/models/{$model}:generateContent?key={$apiKey}";
+    }
+
+    protected function intakeRetryDelays(): array
+    {
+        $delays = config('services.gemini.intake_http_retry_delays_ms', [1000, 3000]);
+
+        if (! is_array($delays) || $delays === []) {
+            return [1000, 3000];
+        }
+
+        return array_values(array_filter(array_map(
+            static fn ($value) => max(0, (int) $value),
+            $delays,
+        ), static fn ($value) => $value >= 0));
     }
 
         protected function documentWorkflowPrompt(): string

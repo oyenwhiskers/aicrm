@@ -4,11 +4,16 @@ use App\Http\Controllers\Api\LeadController;
 use App\Http\Controllers\Api\LeadBankMatchController;
 use App\Http\Controllers\Api\LeadCaptureController;
 use App\Http\Controllers\Api\LeadDocumentController;
+use App\Http\Controllers\Api\LeadIntakeBatchController;
 use App\Http\Controllers\Api\LeadProcessingController;
 use App\Http\Controllers\Api\LeadStageController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/lead-intake/extract-image', [LeadCaptureController::class, 'extract']);
+Route::prefix('lead-intake')->group(function (): void {
+    Route::post('/batches', [LeadIntakeBatchController::class, 'store']);
+    Route::get('/batches/{batch}', [LeadIntakeBatchController::class, 'show']);
+});
 
 Route::prefix('leads')->group(function (): void {
     Route::get('/', [LeadController::class, 'index']);

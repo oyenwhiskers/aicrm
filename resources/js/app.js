@@ -13,7 +13,13 @@ if (appRoot) {
     let noticeTimeoutId = null;
     let modalBodyScrollTop = 0;
     let leadStatusPollTimeoutId = null;
+    let intakeBatchPollTimeoutId = null;
+    let intakeAutoStartTimeoutId = null;
     let pendingLeadListRefresh = false;
+    const intakeBatchStorageKey = 'aicrm:intake-batch';
+    const intakeUploadMaxDimension = 1920;
+    const intakeUploadCompressionThresholdBytes = 900 * 1024;
+    const intakeUploadJpegQuality = 0.9;
 
     const state = {
         appName,
@@ -35,6 +41,10 @@ if (appRoot) {
         extractedSummary: null,
         sourceLabel: 'image extraction',
         intakeImages: [],
+        intakeBatchId: null,
+        intakeBatchStatus: null,
+        intakeBatchNoticeStatus: null,
+        intakePerformance: null,
         intakeDragActive: false,
         selectedDocumentIds: [],
         calculationDefaults: {
@@ -57,6 +67,10 @@ if (appRoot) {
         }
 
         render();
+
+        if (state.page === 'intake') {
+            void restorePersistedIntakeBatch();
+        }
 
         if (state.page === 'workspace') {
             await loadLeads();
@@ -97,6 +111,13 @@ if (appRoot) {
             window.clearTimeout(leadStatusPollTimeoutId);
             leadStatusPollTimeoutId = null;
         }
+    }
+
+    function leadStatusPollDelay() {
+        const documents = state.selectedLead?.documents || [];
+        const hasQueuedDocuments = documents.some((document) => String(document?.upload_status || '') === 'queued');
+
+        return hasQueuedDocuments ? 500 : 1500;
     }
 
     function applyLeadStatusPayload(payload) {
@@ -151,7 +172,7 @@ if (appRoot) {
         if (hasActiveJobs) {
             leadStatusPollTimeoutId = window.setTimeout(() => {
                 loadLeadDocumentStatus(state.selectedLeadId);
-            }, 2000);
+            }, leadStatusPollDelay());
 
             return;
         }
@@ -234,53 +255,508 @@ if (appRoot) {
         render();
     }
 
+    function stopIntakeBatchPolling() {
+        if (intakeBatchPollTimeoutId) {
+            window.clearTimeout(intakeBatchPollTimeoutId);
+            intakeBatchPollTimeoutId = null;
+        }
+    }
+
+    function intakeBatchPollDelay() {
+        return state.intakeBatchStatus === 'queued' ? 500 : 1500;
+    }
+
+    function resetIntakeBatchState() {
+        stopIntakeBatchPolling();
+        state.intakeBatchId = null;
+        state.intakeBatchStatus = null;
+        state.intakeBatchNoticeStatus = null;
+        state.intakePerformance = null;
+        clearPersistedIntakeBatchState();
+    }
+
+    function intakeBatchIsTerminal(status = state.intakeBatchStatus) {
+        return ['completed', 'completed_with_failures', 'failed'].includes(String(status || ''));
+    }
+
+    function intakeImageStatus(status) {
+        return status === 'done'
+            ? 'completed'
+            : status === 'retry_pending'
+                ? 'retrying'
+            : status === 'processing'
+                ? 'processing'
+                : status === 'failed'
+                    ? 'failed'
+                    : 'queued';
+    }
+
+    function sourceImagesLabel(sourceImages = []) {
+        return sourceImages
+            .map((image) => image?.filename)
+            .filter(Boolean)
+            .join(', ');
+    }
+
+    function buildIntakeBatchSummary(payload) {
+        const totalImages = Number(payload?.total_images || 0);
+        const processedImages = Number(payload?.processed_images || 0);
+        const totalRows = Number(payload?.total_rows || 0);
+        const failedImages = Number(payload?.failed_images || 0);
+
+        if (!totalImages) {
+            return null;
+        }
+
+        if (payload.status === 'queued') {
+            return `Queued ${totalImages} image${totalImages === 1 ? '' : 's'} for backend extraction.`;
+        }
+
+        if (payload.status === 'processing') {
+            return `Processed ${processedImages} of ${totalImages} image${totalImages === 1 ? '' : 's'} and found ${totalRows} lead row${totalRows === 1 ? '' : 's'}.`;
+        }
+
+        if (payload.status === 'failed') {
+            return `All ${totalImages} image${totalImages === 1 ? '' : 's'} failed during extraction.`;
+        }
+
+        if (payload.status === 'completed_with_failures') {
+            return `Processed ${processedImages} of ${totalImages} image${totalImages === 1 ? '' : 's'} and found ${totalRows} lead row${totalRows === 1 ? '' : 's'}. ${failedImages} image${failedImages === 1 ? '' : 's'} failed.`;
+        }
+
+        return `Processed ${processedImages} image${processedImages === 1 ? '' : 's'} and found ${totalRows} lead row${totalRows === 1 ? '' : 's'}.`;
+    }
+
+    function applyIntakeBatchPayload(payload) {
+        const batchImages = Array.isArray(payload?.images) ? payload.images : [];
+        const existingImages = new Map(
+            state.intakeImages.map((image, index) => [
+                image.batchImageId ? `batch:${image.batchImageId}` : image.key || `index:${index}`,
+                image,
+            ])
+        );
+
+        state.intakeBatchId = payload?.id || null;
+        state.intakeBatchStatus = payload?.status || null;
+        state.intakePerformance = payload?.performance || null;
+        state.intakeImages = batchImages.map((batchImage, index) => {
+            const existingImage = existingImages.get(`batch:${batchImage.id}`)
+                || existingImages.get(String(batchImage.client_key || ''))
+                || existingImages.get(`index:${index}`)
+                || null;
+
+            return {
+                id: existingImage?.id || batchImage.id,
+                key: existingImage?.key || String(batchImage.client_key || `batch:${batchImage.id}`),
+                name: existingImage?.name || batchImage.original_filename || `Image ${index + 1}`,
+                file: existingImage?.file || null,
+                method: existingImage?.method || 'saved batch',
+                batchImageId: batchImage.id,
+                extractionStatus: intakeImageStatus(batchImage.status),
+                extractedRowCount: Number(batchImage.row_count || 0),
+                extractionError: batchImage.last_error || '',
+                attemptsCount: Number(batchImage.attempts_count || 0),
+                claimedBy: batchImage.claimed_by || '',
+                timing: batchImage.timing || null,
+                pipeline: batchImage.pipeline || null,
+                preprocess: batchImage.preprocess || null,
+            };
+        });
+
+        state.extractedRows = (payload?.rows || []).map((row) => {
+            const sourceImage = sourceImagesLabel(row.source_images || []);
+
+            return {
+                id: row.id,
+                name: row.name || '',
+                phone_number: row.phone_number || '',
+                confidence: row.confidence || 'medium',
+                notes: row.notes || '',
+                source_image: sourceImage,
+                source_images: row.source_images || [],
+            };
+        });
+        state.extractedSummary = buildIntakeBatchSummary(payload);
+        persistIntakeBatchState();
+    }
+
+    function notifyIntakeBatchCompletion(payload) {
+        if (!intakeBatchIsTerminal(payload?.status) || state.intakeBatchNoticeStatus === payload.status) {
+            return;
+        }
+
+        state.intakeBatchNoticeStatus = payload.status;
+
+        if (payload.status === 'completed') {
+            pushNotice(`Extraction complete. ${payload.total_rows} lead row${payload.total_rows === 1 ? '' : 's'} found from ${payload.total_images} image${payload.total_images === 1 ? '' : 's'}.`);
+            return;
+        }
+
+        if (payload.status === 'completed_with_failures') {
+            pushNotice(`Extracted ${payload.total_rows} lead row${payload.total_rows === 1 ? '' : 's'}, but ${payload.failed_images} image${payload.failed_images === 1 ? '' : 's'} failed during AI processing.`, 'error');
+            return;
+        }
+
+        pushNotice('Lead extraction failed for all uploaded images.', 'error');
+    }
+
+    async function loadIntakeBatchStatus(batchId) {
+        try {
+            const payload = await apiRequest(`/lead-intake/batches/${batchId}`);
+
+            if (state.intakeBatchId !== Number(batchId)) {
+                return;
+            }
+
+            applyIntakeBatchPayload(payload.data);
+            notifyIntakeBatchCompletion(payload.data);
+        } catch (error) {
+            stopIntakeBatchPolling();
+            state.loading = false;
+            pushNotice(error.message, 'error');
+            render();
+            return;
+        }
+
+        state.loading = !intakeBatchIsTerminal();
+        render();
+        syncIntakeBatchPolling();
+    }
+
+    function syncIntakeBatchPolling() {
+        stopIntakeBatchPolling();
+
+        if (!state.intakeBatchId || intakeBatchIsTerminal()) {
+            state.loading = false;
+            return;
+        }
+
+        intakeBatchPollTimeoutId = window.setTimeout(() => {
+            loadIntakeBatchStatus(state.intakeBatchId);
+        }, intakeBatchPollDelay());
+    }
+
     async function extractLeadImages() {
-        if (!state.intakeImages.length) {
+        const uploadableImages = state.intakeImages.filter((image) => image.file instanceof File);
+
+        if (!uploadableImages.length) {
             pushNotice('Add at least one image before starting extraction.', 'error');
             return;
         }
 
+        state.intakeImages = uploadableImages.map((image) => ({
+            ...image,
+            extractionStatus: 'queued',
+            extractedRowCount: 0,
+            extractionError: '',
+        }));
+        resetIntakeBatchState();
+        state.extractedRows = [];
         state.loading = true;
+        state.extractedSummary = `Preparing ${state.intakeImages.length} image${state.intakeImages.length === 1 ? '' : 's'} for backend extraction...`;
         render();
 
         try {
-            const combinedRows = [];
+            const preparedImages = await Promise.all(state.intakeImages.map((image) => prepareIntakeUploadFile(image)));
+            const data = new FormData();
 
-            for (const image of state.intakeImages) {
-                const data = new FormData();
-                data.append('image', image.file);
-                data.append('source', state.sourceLabel || 'image extraction');
-
-                const payload = await apiRequest('/lead-intake/extract-image', {
-                    method: 'POST',
-                    body: data,
-                });
-
-                const rows = (payload.data.rows || []).map((row) => ({
-                    ...row,
-                    source_image: image.name,
-                }));
-
-                combinedRows.push(...rows);
-            }
-
-            state.extractedRows = combinedRows;
-            state.extractedSummary = `Processed ${state.intakeImages.length} image${state.intakeImages.length === 1 ? '' : 's'} and found ${combinedRows.length} lead row${combinedRows.length === 1 ? '' : 's'}.`;
-
-            pushNotice(`Extraction complete. ${combinedRows.length} lead rows found from ${state.intakeImages.length} image${state.intakeImages.length === 1 ? '' : 's'}.`);
-        } catch (error) {
-            pushNotice(error.message, 'error');
-        } finally {
-            state.loading = false;
+            state.extractedSummary = `Uploading ${preparedImages.length} image${preparedImages.length === 1 ? '' : 's'} for backend extraction...`;
             render();
+
+            preparedImages.forEach((image) => {
+                data.append('images[]', image.file);
+                data.append('client_keys[]', image.key);
+                data.append('image_metadata[]', JSON.stringify(image.preprocessMetadata || {}));
+            });
+            data.append('source', state.sourceLabel || 'image extraction');
+
+            const payload = await apiRequest('/lead-intake/batches', {
+                method: 'POST',
+                body: data,
+            });
+
+            applyIntakeBatchPayload(payload.data);
+            notifyIntakeBatchCompletion(payload.data);
+            state.loading = !intakeBatchIsTerminal(payload.data.status);
+            syncIntakeBatchPolling();
+        } catch (error) {
+            state.loading = false;
+            pushNotice(error.message, 'error');
         }
+
+        render();
+    }
+
+    function updateIntakeImageProgress(imageId, patch) {
+        state.intakeImages = state.intakeImages.map((image) => image.id === imageId ? { ...image, ...patch } : image);
     }
 
     function setSourceLabel(value) {
         state.sourceLabel = value?.trim() || 'image extraction';
+        persistIntakeBatchState();
+    }
+
+    function intakeStorage() {
+        try {
+            return window.sessionStorage;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function persistIntakeBatchState() {
+        if (state.page !== 'intake') {
+            return;
+        }
+
+        const storage = intakeStorage();
+
+        if (!storage) {
+            return;
+        }
+
+        if (!state.intakeBatchId) {
+            storage.removeItem(intakeBatchStorageKey);
+            return;
+        }
+
+        storage.setItem(intakeBatchStorageKey, JSON.stringify({
+            batchId: state.intakeBatchId,
+            status: state.intakeBatchStatus,
+            sourceLabel: state.sourceLabel || 'image extraction',
+        }));
+    }
+
+    function clearPersistedIntakeBatchState() {
+        intakeStorage()?.removeItem(intakeBatchStorageKey);
+    }
+
+    async function restorePersistedIntakeBatch() {
+        const storage = intakeStorage();
+
+        if (!storage) {
+            return;
+        }
+
+        let savedBatch = null;
+
+        try {
+            savedBatch = JSON.parse(storage.getItem(intakeBatchStorageKey) || 'null');
+        } catch (error) {
+            storage.removeItem(intakeBatchStorageKey);
+            return;
+        }
+
+        const savedBatchId = Number(savedBatch?.batchId || 0);
+
+        if (!Number.isInteger(savedBatchId) || savedBatchId <= 0) {
+            storage.removeItem(intakeBatchStorageKey);
+            return;
+        }
+
+        state.intakeBatchId = savedBatchId;
+        state.intakeBatchStatus = savedBatch?.status || 'queued';
+        state.sourceLabel = savedBatch?.sourceLabel || state.sourceLabel;
+        state.loading = !intakeBatchIsTerminal(savedBatch?.status);
+        state.extractedSummary = 'Restoring the latest intake batch...';
+        render();
+
+        await loadIntakeBatchStatus(savedBatchId);
+    }
+
+    async function prepareIntakeUploadFile(image) {
+        if (!(image?.file instanceof File)) {
+            return image;
+        }
+
+        try {
+            const prepared = await optimizeIntakeImageFile(image.file);
+
+            return {
+                ...image,
+                file: prepared.file,
+                preprocessMetadata: prepared.preprocessMetadata,
+            };
+        } catch (error) {
+            return image;
+        }
+    }
+
+    async function optimizeIntakeImageFile(file) {
+        const { bitmap, width, height } = await readImageBitmap(file);
+        const scale = Math.min(1, intakeUploadMaxDimension / Math.max(width, height));
+        const targetWidth = Math.max(1, Math.round(width * scale));
+        const targetHeight = Math.max(1, Math.round(height * scale));
+        const needsResize = scale < 1;
+        const shouldCompress = file.size >= intakeUploadCompressionThresholdBytes || file.type === 'image/png' || needsResize;
+        const baseMetadata = {
+            strategy: shouldCompress ? 'browser_optimized' : 'browser_passthrough',
+            original: {
+                name: file.name,
+                type: file.type || 'application/octet-stream',
+                size: file.size,
+                width,
+                height,
+            },
+            optimized: {
+                name: file.name,
+                type: file.type || 'application/octet-stream',
+                size: file.size,
+                width,
+                height,
+            },
+            scale,
+            resized: needsResize,
+            compressed: false,
+            prepared_at: new Date().toISOString(),
+        };
+
+        if (!shouldCompress) {
+            closeIntakeImageSource(bitmap);
+
+            return {
+                file,
+                preprocessMetadata: baseMetadata,
+            };
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+
+        const context = canvas.getContext('2d');
+
+        if (!context) {
+            closeIntakeImageSource(bitmap);
+
+            return {
+                file,
+                preprocessMetadata: baseMetadata,
+            };
+        }
+
+        context.drawImage(bitmap, 0, 0, targetWidth, targetHeight);
+        closeIntakeImageSource(bitmap);
+
+        const blob = await canvasToBlob(canvas, 'image/jpeg', intakeUploadJpegQuality);
+
+        if (!blob) {
+            return {
+                file,
+                preprocessMetadata: baseMetadata,
+            };
+        }
+
+        if (!needsResize && blob.size >= file.size * 0.95) {
+            return {
+                file,
+                preprocessMetadata: baseMetadata,
+            };
+        }
+
+        const optimizedName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+
+        const optimizedFile = new File([blob], optimizedName, {
+            type: blob.type || 'image/jpeg',
+            lastModified: file.lastModified,
+        });
+
+        return {
+            file: optimizedFile,
+            preprocessMetadata: {
+                ...baseMetadata,
+                compressed: true,
+                optimized: {
+                    name: optimizedFile.name,
+                    type: optimizedFile.type || 'image/jpeg',
+                    size: optimizedFile.size,
+                    width: targetWidth,
+                    height: targetHeight,
+                },
+            },
+        };
+    }
+
+    async function readImageBitmap(file) {
+        if (window.createImageBitmap) {
+            const bitmap = await window.createImageBitmap(file);
+
+            return {
+                bitmap,
+                width: bitmap.width,
+                height: bitmap.height,
+            };
+        }
+
+        const image = await loadImageElement(file);
+
+        return {
+            bitmap: image,
+            width: image.naturalWidth,
+            height: image.naturalHeight,
+        };
+    }
+
+    function closeIntakeImageSource(imageSource) {
+        if (typeof imageSource?.close === 'function') {
+            imageSource.close();
+        }
+    }
+
+    function loadImageElement(file) {
+        return new Promise((resolve, reject) => {
+            const objectUrl = URL.createObjectURL(file);
+            const image = new Image();
+
+            image.onload = () => {
+                URL.revokeObjectURL(objectUrl);
+                resolve(image);
+            };
+
+            image.onerror = () => {
+                URL.revokeObjectURL(objectUrl);
+                reject(new Error('Unable to load image for intake optimization.'));
+            };
+
+            image.src = objectUrl;
+        });
+    }
+
+    function canvasToBlob(canvas, type, quality) {
+        return new Promise((resolve) => {
+            canvas.toBlob((blob) => resolve(blob), type, quality);
+        });
+    }
+
+    function scheduleAutoIntakeExtraction() {
+        if (intakeAutoStartTimeoutId) {
+            window.clearTimeout(intakeAutoStartTimeoutId);
+        }
+
+        intakeAutoStartTimeoutId = window.setTimeout(() => {
+            intakeAutoStartTimeoutId = null;
+
+            if (state.page !== 'intake' || state.loading || !state.intakeImages.length) {
+                return;
+            }
+
+            void extractLeadImages();
+        }, 150);
     }
 
     function queueIntakeFiles(files, captureMethod = 'upload') {
+        if (state.loading) {
+            pushNotice('Wait for the current extraction batch to finish before changing the queue.', 'error');
+            return;
+        }
+
+        if (state.intakeBatchId && state.intakeImages.length && state.intakeImages.every((image) => !(image.file instanceof File))) {
+            resetIntakeBatchState();
+            state.intakeImages = [];
+            state.extractedRows = [];
+            state.extractedSummary = null;
+        }
+
         const validFiles = Array.from(files || []).filter((file) => file instanceof File && file.type.startsWith('image/'));
 
         if (!validFiles.length) {
@@ -296,6 +772,9 @@ if (appRoot) {
                 name: file.name || `clipboard-image-${Date.now()}.png`,
                 file,
                 method: captureMethod,
+                extractionStatus: 'queued',
+                extractedRowCount: 0,
+                extractionError: '',
             }))
             .filter((image) => !existingKeys.has(image.key));
 
@@ -312,14 +791,26 @@ if (appRoot) {
         }
 
         render();
+        scheduleAutoIntakeExtraction();
     }
 
     function clearIntakeQueue() {
+        if (state.loading) {
+            pushNotice('Wait for the current extraction batch to finish before clearing the queue.', 'error');
+            return;
+        }
+
         state.intakeImages = [];
+        resetIntakeBatchState();
         render();
     }
 
     function removeQueuedImage(imageId) {
+        if (state.loading) {
+            pushNotice('Wait for the current extraction batch to finish before removing queued images.', 'error');
+            return;
+        }
+
         state.intakeImages = state.intakeImages.filter((image) => image.id !== imageId);
         render();
     }
@@ -481,6 +972,7 @@ if (appRoot) {
             state.extractedRows = [];
             state.extractedSummary = null;
             state.intakeImages = [];
+            resetIntakeBatchState();
             window.location.href = '/workspace';
         } catch (error) {
             pushNotice(error.message, 'error');
@@ -912,24 +1404,25 @@ if (appRoot) {
                         </div>
                     </div>
                     <div class="crm-card-body">
-                    <form id="lead-image-form" class="crm-intake-capture crm-form-grid" enctype="multipart/form-data">
+                    <div class="crm-intake-capture crm-form-grid">
                         <input id="lead-image-input" type="file" name="image" accept="image/*" multiple hidden>
-                        <button type="button" class="crm-intake-surface ${state.intakeImages.length ? 'is-ready' : ''}" data-action="pick-image">
+                        <button type="button" class="crm-intake-surface ${state.intakeImages.length ? 'is-ready' : ''}" data-action="pick-image" ${state.loading ? 'disabled' : ''}>
                             <span class="crm-dropzone-icon">${state.intakeImages.length ? state.intakeImages.length : '+'}</span>
                             <span class="crm-intake-surface-copy">
                                 <strong>${state.intakeImages.length ? `${state.intakeImages.length} image${state.intakeImages.length === 1 ? '' : 's'} ready` : 'Click, paste, or drop screenshots anywhere'}</strong>
-                                <span>${state.intakeImages.length ? 'You can keep adding more images before extraction.' : 'Supports screenshots, exported chats, and raw lead list images.'}</span>
+                                <span>${state.intakeImages.length ? 'Extraction starts automatically after new images are added.' : 'Supports screenshots, exported chats, and raw lead list images.'}</span>
                             </span>
                         </button>
 
                         <div class="crm-intake-queue ${state.intakeImages.length ? '' : 'is-empty'}">
                             ${state.intakeImages.length ? state.intakeImages.map((image) => `
                                 <article class="crm-queue-item">
-                                    <div>
+                                    <div class="crm-queue-item-main">
                                         <strong>${escapeHtml(image.name)}</strong>
                                         <span>${escapeHtml(image.method.replace('-', ' '))}</span>
+                                        ${renderIntakeImageProgress(image)}
                                     </div>
-                                    <button type="button" class="crm-button crm-button--ghost crm-button--small" data-remove-image="${image.id}">Remove</button>
+                                    <button type="button" class="crm-button crm-button--ghost crm-button--small" data-remove-image="${image.id}" ${state.loading ? 'disabled' : ''}>Remove</button>
                                 </article>
                             `).join('') : '<div class="crm-empty"><strong>No images queued</strong><span>Paste, drag, or upload one or more images to begin.</span></div>'}
                         </div>
@@ -939,13 +1432,14 @@ if (appRoot) {
                                 ${state.loading ? `
                                     <span class="crm-spinner" aria-hidden="true"></span>
                                     <p class="crm-footer-note">Extracting image data. Please wait...</p>
-                                ` : '<p class="crm-footer-note">Use clear screenshots where each row shows a name and phone number.</p>'}
+                                ` : '<p class="crm-footer-note">Use clear screenshots where each row shows a name and phone number. Extraction starts automatically after upload, paste, or drop.</p>'}
                             </div>
                             <div class="crm-intake-footer-actions">
-                                <button class="crm-button" ${state.loading || !state.intakeImages.length ? 'disabled' : ''}>${state.loading ? 'Extracting...' : `Extract ${state.intakeImages.length ? `${state.intakeImages.length} Image${state.intakeImages.length === 1 ? '' : 's'}` : 'Leads'}`}</button>
+                                <button type="button" class="crm-button crm-button--ghost" data-action="clear-image" ${state.loading || !state.intakeImages.length ? 'disabled' : ''}>Reset Intake</button>
                             </div>
                         </div>
-                    </form>
+                        ${renderIntakePerformanceInsights()}
+                    </div>
                     </div>
                 </section>
 
@@ -1034,6 +1528,371 @@ if (appRoot) {
                 ${renderLeadModal()}
             </section>
         `;
+    }
+
+    function renderIntakeImageProgress(image) {
+        const status = image.extractionStatus || 'queued';
+        const tone = status === 'completed'
+            ? 'matched'
+            : status === 'failed'
+                ? 'failed'
+                : status === 'retrying'
+                    ? 'stage'
+                : status === 'processing'
+                    ? 'stage'
+                    : 'neutral';
+        const label = status === 'completed'
+            ? `Done${image.extractedRowCount ? ` · ${image.extractedRowCount} row${image.extractedRowCount === 1 ? '' : 's'}` : ''}`
+            : status === 'failed'
+                ? 'Failed'
+                : status === 'retrying'
+                    ? 'Retrying'
+                : status === 'processing'
+                    ? 'Processing'
+                    : 'Queued';
+        const timingDetails = intakeImageTimingDetails(image);
+        const pipelineSummary = renderIntakeImagePipeline(image);
+        const preprocessSummary = renderIntakeImagePreprocess(image);
+
+        return `
+            <div class="crm-queue-progress">
+                <span class="crm-badge" data-tone="${tone}">${escapeHtml(label)}</span>
+                ${pipelineSummary}
+                ${timingDetails ? `<span class="crm-meta-text">${escapeHtml(timingDetails)}</span>` : ''}
+                ${preprocessSummary}
+                ${(status === 'failed' || status === 'retrying') && image.extractionError ? `<span class="crm-queue-error">${escapeHtml(image.extractionError)}</span>` : ''}
+            </div>
+        `;
+    }
+
+    function renderIntakePerformanceInsights() {
+        const performance = state.intakePerformance;
+
+        if (!performance || (!state.intakeBatchId && !state.intakeImages.length)) {
+            return '';
+        }
+
+        const items = [];
+        const totalElapsed = Number(performance?.total_elapsed_seconds);
+        const avgQueueWait = Number(performance?.avg_queue_wait_seconds);
+        const avgAiSlotWait = Number(performance?.avg_ai_slot_wait_seconds);
+        const avgAiProcessing = Number(performance?.avg_ai_processing_seconds);
+        const avgAggregation = Number(performance?.avg_aggregation_seconds);
+        const distinctWorkers = Number(performance?.distinct_workers);
+        const imagesPerWorker = Number(performance?.images_per_worker);
+        const totalImages = Number(performance?.total_images);
+        const serialBatchProcessing = Boolean(performance?.serial_batch_processing);
+        const imagesPerMinute = Number(performance?.images_per_minute);
+        const retriedImages = Number(performance?.retried_images);
+        const aiSlotWaitImages = Number(performance?.ai_slot_wait_images);
+        const avgTransferSavedBytes = Number(performance?.avg_transfer_saved_bytes);
+        const dominantStage = intakeInfrastructureStageLabel(performance?.dominant_stage);
+
+        if (Number.isFinite(totalElapsed) && totalElapsed >= 0) {
+            items.push({ label: 'Batch total', value: formatDurationSeconds(totalElapsed), tone: 'neutral' });
+        }
+
+        if (Number.isFinite(avgQueueWait) && avgQueueWait >= 0) {
+            items.push({ label: 'Avg queue wait', value: formatDurationSeconds(avgQueueWait), tone: performance?.dominant_stage === 'queue_wait' ? 'review' : 'neutral' });
+        }
+
+        if (Number.isFinite(avgAiSlotWait) && avgAiSlotWait > 0) {
+            items.push({ label: 'Avg AI slot wait', value: formatDurationSeconds(avgAiSlotWait), tone: performance?.dominant_stage === 'ai_slot_wait' ? 'review' : 'neutral' });
+        }
+
+        if (Number.isFinite(avgAiProcessing) && avgAiProcessing >= 0) {
+            items.push({ label: 'Avg AI processing', value: formatDurationSeconds(avgAiProcessing), tone: performance?.dominant_stage === 'ai_processing' ? 'review' : 'neutral' });
+        }
+
+        if (Number.isFinite(avgAggregation) && avgAggregation > 0) {
+            items.push({ label: 'Avg aggregation', value: formatDurationSeconds(avgAggregation), tone: performance?.dominant_stage === 'aggregation' ? 'review' : 'neutral' });
+        }
+
+        if (Number.isFinite(distinctWorkers) && distinctWorkers > 0) {
+            items.push({ label: 'Workers seen', value: `${distinctWorkers}`, tone: 'stage' });
+        }
+
+        if (Number.isFinite(totalImages) && totalImages > 0) {
+            items.push({ label: 'Images', value: `${totalImages}`, tone: 'neutral' });
+        }
+
+        if (Number.isFinite(imagesPerWorker) && imagesPerWorker > 0) {
+            items.push({ label: 'Images/worker', value: `${imagesPerWorker}`, tone: serialBatchProcessing ? 'review' : 'stage' });
+        }
+
+        if (Number.isFinite(imagesPerMinute) && imagesPerMinute > 0) {
+            items.push({ label: 'Throughput', value: `${imagesPerMinute}/min`, tone: 'stage' });
+        }
+
+        if (Number.isFinite(retriedImages) && retriedImages > 0) {
+            items.push({ label: 'Retried images', value: `${retriedImages}`, tone: 'review' });
+        }
+
+        if (Number.isFinite(aiSlotWaitImages) && aiSlotWaitImages > 0) {
+            items.push({ label: 'AI slot waits', value: `${aiSlotWaitImages}`, tone: 'review' });
+        }
+
+        if (Number.isFinite(avgTransferSavedBytes) && avgTransferSavedBytes > 0) {
+            items.push({ label: 'Avg upload saved', value: formatBytes(avgTransferSavedBytes), tone: 'matched' });
+        }
+
+        return `
+            <div class="crm-intake-performance-card">
+                <div class="crm-intake-performance-head">
+                    <strong>Infrastructure Insights</strong>
+                    ${dominantStage ? `<span class="crm-badge" data-tone="review">Bottleneck ${escapeHtml(dominantStage)}</span>` : ''}
+                </div>
+                ${serialBatchProcessing ? `<span class="crm-meta-text">Serial batch processing detected: this batch used one worker for multiple images, so later images waited behind earlier ones.</span>` : ''}
+                <div class="crm-intake-performance-grid">
+                    ${items.map((item) => `
+                        <span class="crm-badge" data-tone="${item.tone}">${escapeHtml(`${item.label} ${item.value}`)}</span>
+                    `).join('')}
+                </div>
+                ${performance?.recommendation ? `<p class="crm-card-note">${escapeHtml(performance.recommendation)}</p>` : ''}
+            </div>
+        `;
+    }
+
+    function renderIntakeImagePipeline(image) {
+        const pipeline = image?.pipeline || null;
+
+        if (!pipeline) {
+            return '';
+        }
+
+        const currentStageLabel = intakePipelineStageLabel(pipeline.current_stage || 'queued');
+        const currentStateLabel = intakePipelineStateLabel(pipeline.current_state || 'waiting');
+        const totalElapsed = Number(image?.timing?.total_elapsed_seconds);
+        const totalSuffix = Number.isFinite(totalElapsed) && totalElapsed >= 0
+            ? ` · Total ${formatDurationSeconds(totalElapsed)}`
+            : '';
+        const stages = orderedIntakePipelineStages(pipeline.stages || {});
+        const chips = stages.map(([stageName, stage]) => {
+            const tone = intakePipelineTone(stageName, stage?.state);
+            const label = intakePipelineStageLabel(stageName);
+            const elapsed = Number(stage?.elapsed_seconds);
+            const suffix = Number.isFinite(elapsed) && elapsed >= 0 ? ` ${formatDurationSeconds(elapsed)}` : '';
+            const current = pipeline.current_stage === stageName ? ' crm-badge--current' : '';
+
+            return `<span class="crm-badge${current}" data-tone="${tone}">${escapeHtml(`${label}${suffix}`)}</span>`;
+        }).join('');
+
+        return `
+            <div class="crm-queue-stage-block">
+                <span class="crm-meta-text">Stage ${escapeHtml(currentStageLabel)} · ${escapeHtml(currentStateLabel)}${escapeHtml(totalSuffix)}</span>
+                ${chips ? `<div class="crm-queue-stage-chips">${chips}</div>` : ''}
+            </div>
+        `;
+    }
+
+    function renderIntakeImagePreprocess(image) {
+        const preprocess = image?.preprocess || null;
+
+        if (!preprocess) {
+            return '';
+        }
+
+        const details = [];
+        const originalSize = Number(preprocess?.original?.size);
+        const optimizedSize = Number(preprocess?.optimized?.size);
+        const originalDimensions = formatImageDimensions(preprocess?.original);
+        const optimizedDimensions = formatImageDimensions(preprocess?.optimized);
+        const savedBytes = Number(preprocess?.transfer_saved_bytes);
+        const strategy = intakePreprocessStrategyLabel(preprocess?.strategy);
+
+        if (strategy) {
+            details.push(strategy);
+        }
+
+        if (Number.isFinite(originalSize) && originalSize > 0 && Number.isFinite(optimizedSize) && optimizedSize > 0) {
+            const sizeSummary = originalSize === optimizedSize
+                ? `${formatBytes(originalSize)} upload`
+                : `${formatBytes(originalSize)} -> ${formatBytes(optimizedSize)}`;
+
+            details.push(sizeSummary);
+        }
+
+        if (originalDimensions && optimizedDimensions) {
+            details.push(originalDimensions === optimizedDimensions
+                ? originalDimensions
+                : `${originalDimensions} -> ${optimizedDimensions}`);
+        }
+
+        if (Number.isFinite(savedBytes) && savedBytes > 0) {
+            details.push(`${formatBytes(savedBytes)} saved`);
+        }
+
+        return details.length
+            ? `<span class="crm-meta-text">Preprocess ${escapeHtml(details.join(' · '))}</span>`
+            : '';
+    }
+
+    function intakeImageTimingDetails(image) {
+        const details = [];
+        const queueWait = Number(image?.timing?.queue_wait_seconds);
+        const processingTime = Number(image?.timing?.processing_seconds);
+        const totalTime = Number(image?.timing?.total_elapsed_seconds);
+        const attemptsCount = Number(image?.attemptsCount || 0);
+        const claimedBy = String(image?.claimedBy || '').trim();
+
+        if (Number.isFinite(queueWait) && queueWait >= 0) {
+            details.push(`Queue wait ${formatDurationSeconds(queueWait)}`);
+        }
+
+        if (Number.isFinite(processingTime) && processingTime >= 0 && image?.extractionStatus !== 'queued') {
+            details.push(`Processing ${formatDurationSeconds(processingTime)}`);
+        }
+
+        if (Number.isFinite(totalTime) && totalTime >= 0 && ['completed', 'failed'].includes(String(image?.extractionStatus || ''))) {
+            details.push(`Total ${formatDurationSeconds(totalTime)}`);
+        }
+
+        if (attemptsCount > 0) {
+            details.push(`Attempts ${attemptsCount}`);
+        }
+
+        if (claimedBy) {
+            details.push(`Worker ${claimedBy}`);
+        }
+
+        return details.join(' · ');
+    }
+
+    function formatDurationSeconds(totalSeconds) {
+        const normalized = Math.max(0, Math.round(Number(totalSeconds) || 0));
+
+        if (normalized < 60) {
+            return `${normalized}s`;
+        }
+
+        const minutes = Math.floor(normalized / 60);
+        const seconds = normalized % 60;
+
+        if (minutes < 60) {
+            return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`;
+        }
+
+        const hours = Math.floor(minutes / 60);
+        const remainingMinutes = minutes % 60;
+
+        if (!remainingMinutes && !seconds) {
+            return `${hours}h`;
+        }
+
+        if (!seconds) {
+            return `${hours}h ${remainingMinutes}m`;
+        }
+
+        return `${hours}h ${remainingMinutes}m ${seconds}s`;
+    }
+
+    function orderedIntakePipelineStages(stages) {
+        const order = ['queued', 'preprocess', 'waiting_for_ai_slot', 'ai_processing', 'aggregating', 'retry_pending', 'failed', 'completed'];
+
+        return order
+            .filter((stage) => Object.prototype.hasOwnProperty.call(stages || {}, stage))
+            .map((stage) => [stage, stages[stage] || {}]);
+    }
+
+    function intakePipelineStageLabel(stage) {
+        const labels = {
+            queued: 'Queued',
+            preprocess: 'Preprocess',
+            waiting_for_ai_slot: 'Waiting for AI slot',
+            ai_processing: 'AI processing',
+            aggregating: 'Aggregating',
+            retry_pending: 'Retry pending',
+            failed: 'Failed',
+            completed: 'Completed',
+        };
+
+        return labels[String(stage || '')] || String(stage || 'Queued').replaceAll('_', ' ');
+    }
+
+    function intakePipelineStateLabel(stateValue) {
+        const labels = {
+            waiting: 'waiting',
+            active: 'active',
+            queued: 'queued',
+            completed: 'completed',
+            failed: 'failed',
+            retry_pending: 'retry pending',
+        };
+
+        return labels[String(stateValue || '')] || String(stateValue || '').replaceAll('_', ' ');
+    }
+
+    function intakePipelineTone(stage, stateValue) {
+        if (stage === 'failed' || stateValue === 'failed') {
+            return 'failed';
+        }
+
+        if (stage === 'completed' || stateValue === 'completed') {
+            return 'matched';
+        }
+
+        if (stage === 'retry_pending' || stateValue === 'retry_pending') {
+            return 'review';
+        }
+
+        return 'stage';
+    }
+
+    function intakePreprocessStrategyLabel(strategy) {
+        const labels = {
+            browser_optimized: 'browser optimized',
+            browser_passthrough: 'browser passthrough',
+            server_received: 'server received',
+        };
+
+        return labels[String(strategy || '')] || String(strategy || '').replaceAll('_', ' ');
+    }
+
+    function intakeInfrastructureStageLabel(stage) {
+        const labels = {
+            queue_wait: 'Queue wait',
+            ai_slot_wait: 'AI slot wait',
+            ai_processing: 'AI processing',
+            aggregation: 'Aggregation',
+        };
+
+        return labels[String(stage || '')] || String(stage || '').replaceAll('_', ' ');
+    }
+
+    function formatImageDimensions(shape) {
+        const width = Number(shape?.width);
+        const height = Number(shape?.height);
+
+        if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+            return '';
+        }
+
+        return `${width}x${height}`;
+    }
+
+    function formatBytes(value) {
+        const size = Number(value);
+
+        if (!Number.isFinite(size) || size < 0) {
+            return '';
+        }
+
+        if (size < 1024) {
+            return `${Math.round(size)} B`;
+        }
+
+        const units = ['KB', 'MB', 'GB'];
+        let unitIndex = -1;
+        let normalized = size;
+
+        do {
+            normalized /= 1024;
+            unitIndex += 1;
+        } while (normalized >= 1024 && unitIndex < units.length - 1);
+
+        const precision = normalized >= 100 ? 0 : normalized >= 10 ? 1 : 2;
+
+        return `${normalized.toFixed(precision)} ${units[unitIndex]}`;
     }
 
     function renderLeadTable() {
@@ -1630,11 +2489,6 @@ if (appRoot) {
     }
 
     function bindEvents() {
-        document.querySelector('#lead-image-form')?.addEventListener('submit', (event) => {
-            event.preventDefault();
-            extractLeadImages();
-        });
-
         document.querySelectorAll('[data-action="pick-image"]').forEach((button) => {
             button.addEventListener('click', () => document.querySelector('#lead-image-input')?.click());
         });
