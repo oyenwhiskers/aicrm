@@ -3,30 +3,33 @@
 namespace App\Services;
 
 use App\Models\IntakeImageAttempt;
-use Illuminate\Contracts\Cache\Lock;
-use Illuminate\Support\Facades\Cache;
 
 class IntakeGeminiConcurrencyService
 {
+    public function __construct(
+        protected GeminiConcurrencyService $geminiConcurrencyService,
+    ) {
+    }
+
     public function acquire(int $batchId): ?array
     {
-        $leaseSeconds = max(30, (int) config('services.gemini.intake_slot_lease_seconds', 240));
+        $leaseSeconds = $this->geminiConcurrencyService->leaseSeconds();
         $globalLimit = $this->effectiveGlobalConcurrency();
         $batchLimit = max(1, min(
             (int) config('services.gemini.intake_per_batch_concurrency', 2),
             $globalLimit,
         ));
 
-        $globalLock = $this->acquireSlotLock('intake-gemini:global', $globalLimit, $leaseSeconds);
+        $globalLock = $this->geminiConcurrencyService->acquireGlobal($globalLimit, $leaseSeconds);
 
         if (! $globalLock) {
             return null;
         }
 
-        $batchLock = $this->acquireSlotLock("intake-gemini:batch:{$batchId}", $batchLimit, $leaseSeconds);
+        $batchLock = $this->geminiConcurrencyService->acquireScopedSlot("intake-gemini:batch:{$batchId}", $batchLimit, $leaseSeconds);
 
         if (! $batchLock) {
-            $globalLock->release();
+            $this->geminiConcurrencyService->release($globalLock);
 
             return null;
         }
@@ -41,45 +44,17 @@ class IntakeGeminiConcurrencyService
 
     public function release(?array $lease): void
     {
-        if (! is_array($lease)) {
-            return;
-        }
-
-        foreach (['batch', 'global'] as $key) {
-            $lock = $lease[$key] ?? null;
-
-            if (! $lock instanceof Lock) {
-                continue;
-            }
-
-            try {
-                $lock->release();
-            } catch (\Throwable) {
-            }
-        }
+        $this->geminiConcurrencyService->release($lease);
     }
 
     public function slotRequeueDelaySeconds(): int
     {
-        return max(1, (int) config('services.gemini.intake_slot_requeue_seconds', 3));
-    }
-
-    protected function acquireSlotLock(string $prefix, int $limit, int $leaseSeconds): ?Lock
-    {
-        for ($slot = 1; $slot <= max(1, $limit); $slot++) {
-            $lock = Cache::lock("{$prefix}:{$slot}", $leaseSeconds);
-
-            if ($lock->get()) {
-                return $lock;
-            }
-        }
-
-        return null;
+        return $this->geminiConcurrencyService->slotRequeueDelaySeconds();
     }
 
     protected function effectiveGlobalConcurrency(): int
     {
-        $base = max(1, (int) config('services.gemini.intake_global_concurrency', 2));
+        $base = $this->geminiConcurrencyService->globalConcurrency();
         $minimum = max(1, min(
             (int) config('services.gemini.intake_adaptive_min_concurrency', 1),
             $base,

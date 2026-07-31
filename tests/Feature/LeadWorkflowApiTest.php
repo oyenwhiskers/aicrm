@@ -92,27 +92,27 @@ class LeadWorkflowApiTest extends TestCase
         $this->postJson("/api/leads/{$lead->id}/documents", [
             'document_type' => 'ic',
             'file' => UploadedFile::fake()->image('ic.jpg'),
-        ])->assertCreated()
+        ])->assertAccepted()
             ->assertJsonPath('data.lead_stage', LeadStage::DOC_PARTIAL->value);
 
         for ($index = 1; $index <= 3; $index++) {
             $this->postJson("/api/leads/{$lead->id}/documents", [
                 'document_type' => 'payslip',
                 'file' => UploadedFile::fake()->create("payslip-{$index}.pdf", 200, 'application/pdf'),
-            ])->assertCreated();
+            ])->assertAccepted();
         }
 
         $this->postJson("/api/leads/{$lead->id}/documents", [
             'document_type' => 'ctos',
             'file' => UploadedFile::fake()->create('ctos.pdf', 200, 'application/pdf'),
-        ])->assertCreated();
+        ])->assertAccepted();
 
         $finalResponse = $this->postJson("/api/leads/{$lead->id}/documents", [
             'document_type' => 'ramci',
             'file' => UploadedFile::fake()->create('ramci.pdf', 200, 'application/pdf'),
         ]);
 
-        $finalResponse->assertCreated()
+        $finalResponse->assertAccepted()
             ->assertJsonPath('data.lead_stage', LeadStage::DOC_COMPLETE->value)
             ->assertJsonPath('data.document_completeness.is_complete', true);
     }

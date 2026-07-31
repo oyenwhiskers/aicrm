@@ -6,6 +6,7 @@ enum DocumentType: string
 {
     case IC = 'ic';
     case PAYSLIP = 'payslip';
+    case PENSION_SLIP = 'pension_slip';
     case EPF = 'epf';
     case CTOS = 'ctos';
     case RAMCI = 'ramci';
@@ -32,6 +33,11 @@ enum DocumentType: string
             ->pluck('key')
             ->values()
             ->all();
+    }
+
+    public static function allowedUploadSlots(): array
+    {
+        return self::allowedChecklistKeys();
     }
 
     public static function requiredForPrototype(): array

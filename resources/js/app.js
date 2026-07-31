@@ -22,6 +22,9 @@ if (appRoot) {
     const intakeUploadMaxDimension = 1920;
     const intakeUploadCompressionThresholdBytes = 900 * 1024;
     const intakeUploadJpegQuality = 0.9;
+    const documentUploadChunkTargetBytes = 10 * 1024 * 1024;
+    const documentUploadChunkMaxFiles = 3;
+    const documentUploadMultipartOverheadBytes = 256 * 1024;
 
     const state = {
         appName,
@@ -113,8 +116,16 @@ if (appRoot) {
         return ['queued', 'processing', 'deleting'];
     }
 
+    function deleteBlockedDocumentStatuses() {
+        return ['processing', 'deleting'];
+    }
+
     function documentIsActive(document) {
         return activeDocumentStatuses().includes(String(document?.upload_status || ''));
+    }
+
+    function documentBlocksDeletion(document) {
+        return deleteBlockedDocumentStatuses().includes(String(document?.upload_status || ''));
     }
 
     function leadHasActiveDocumentJobs(lead = state.selectedLead) {
@@ -1128,25 +1139,37 @@ if (appRoot) {
         if (!uploadFiles.length) {
             return;
         }
-
-        const data = new FormData();
-        uploadFiles.forEach((file) => data.append('files[]', file));
+        const uploadChunks = chunkDocumentUploads(uploadFiles);
+        let uploadedCount = 0;
+        let lastPayload = null;
 
         state.loading = true;
         state.uploadingDocuments = true;
-        state.modalBusyMessage = 'Uploading documents and updating checklist...';
+        state.modalBusyMessage = buildDocumentUploadBusyMessage(0, uploadFiles.length, 0, uploadChunks.length);
         state.documentStageDragActive = false;
         render();
 
         try {
-            const payload = await apiRequest(`/leads/${state.selectedLeadId}/documents/batch`, {
-                method: 'POST',
-                body: data,
-            });
+            for (let index = 0; index < uploadChunks.length; index += 1) {
+                const chunk = uploadChunks[index];
+                const data = new FormData();
+                chunk.forEach((file) => data.append('files[]', file));
 
-            applyLeadStatusPayload(payload.data);
+                state.modalBusyMessage = buildDocumentUploadBusyMessage(uploadedCount, uploadFiles.length, index + 1, uploadChunks.length);
+                render();
+
+                const payload = await apiRequest(`/leads/${state.selectedLeadId}/documents/batch`, {
+                    method: 'POST',
+                    body: data,
+                });
+
+                uploadedCount += Number(payload?.data?.uploaded_count || chunk.length);
+                lastPayload = payload;
+                applyLeadStatusPayload(payload.data);
+            }
+
             pendingLeadListRefresh = true;
-            pushNotice(`Queued ${payload.data.uploaded_count} document${payload.data.uploaded_count === 1 ? '' : 's'} for background processing.`);
+            pushNotice(`Queued ${uploadedCount} document${uploadedCount === 1 ? '' : 's'} for background processing.`);
             syncLeadStatusPolling();
         } catch (error) {
             pushNotice(error.message, 'error');
@@ -1156,6 +1179,46 @@ if (appRoot) {
             state.modalBusyMessage = '';
             render();
         }
+    }
+
+    function chunkDocumentUploads(files) {
+        const chunks = [];
+        let currentChunk = [];
+        let currentChunkBytes = 0;
+
+        for (const file of files) {
+            const fileBytes = Number(file?.size || 0);
+            const projectedBytes = currentChunkBytes + fileBytes + documentUploadMultipartOverheadBytes;
+            const exceedsSizeTarget = currentChunk.length > 0 && projectedBytes > documentUploadChunkTargetBytes;
+            const exceedsFileTarget = currentChunk.length >= documentUploadChunkMaxFiles;
+
+            if (exceedsSizeTarget || exceedsFileTarget) {
+                chunks.push(currentChunk);
+                currentChunk = [];
+                currentChunkBytes = 0;
+            }
+
+            currentChunk.push(file);
+            currentChunkBytes += fileBytes;
+        }
+
+        if (currentChunk.length) {
+            chunks.push(currentChunk);
+        }
+
+        return chunks;
+    }
+
+    function buildDocumentUploadBusyMessage(uploadedCount, totalCount, chunkNumber, chunkTotal) {
+        if (chunkTotal <= 1) {
+            return 'Uploading documents and updating checklist...';
+        }
+
+        const uploadedLabel = uploadedCount > 0
+            ? `Queued ${uploadedCount} of ${totalCount} documents. `
+            : '';
+
+        return `${uploadedLabel}Uploading batch ${chunkNumber} of ${chunkTotal} and updating checklist...`;
     }
 
     async function updateDocumentAssignment(documentId, assignmentKey) {
@@ -1304,7 +1367,7 @@ if (appRoot) {
 
     function toggleAllDocumentSelections(checked) {
         const selectableIds = (state.selectedLead?.documents || [])
-            .filter((document) => !documentIsActive(document))
+            .filter((document) => !documentBlocksDeletion(document))
             .map((document) => Number(document.id));
 
         state.selectedDocumentIds = checked ? selectableIds : [];
@@ -2697,7 +2760,7 @@ if (appRoot) {
             <section class="crm-stack crm-document-stage" data-document-stage-dropzone>
                 ${state.documentStageDragActive ? '<div class="crm-document-stage-overlay"><strong>Drop documents anywhere in this stage</strong><span>The files will upload and process automatically.</span></div>' : ''}
                 <section class="crm-card crm-card--solid">
-                    <div class="crm-card-head"><div><h3 class="crm-card-title">Upload</h3><p class="crm-card-note">Auto-detects IC, payslip, EPF, RAMCI, and CTOS, then updates the checklist.</p></div><span class="crm-badge" data-tone="${lead.document_completeness?.is_complete ? 'matched' : lead.document_completeness?.has_review_items ? 'review' : 'stage'}">${lead.document_completeness?.received_required_slot_count || 0}/${lead.document_completeness?.required_document_slot_count || 0} matched</span></div>
+                    <div class="crm-card-head"><div><h3 class="crm-card-title">Upload</h3><p class="crm-card-note">Auto-detects IC, payslip, pension slip, EPF, RAMCI, and CTOS, then updates the checklist.</p></div><span class="crm-badge" data-tone="${lead.document_completeness?.is_complete ? 'matched' : lead.document_completeness?.has_review_items ? 'review' : 'stage'}">${lead.document_completeness?.received_required_slot_count || 0}/${lead.document_completeness?.required_document_slot_count || 0} matched</span></div>
                     <div class="crm-card-body crm-stack">
                         <div class="crm-bulk-upload" data-document-dropzone>
                             <input id="lead-document-input" type="file" accept="image/*,.pdf" multiple hidden>
@@ -2901,7 +2964,7 @@ if (appRoot) {
     }
 
     function uploadedDocumentsSelectableCount(documents) {
-        return (documents || []).filter((document) => !documentIsActive(document)).length;
+        return (documents || []).filter((document) => !documentBlocksDeletion(document)).length;
     }
 
     function renderUploadedDocumentRows(documents, extractedByDocumentId) {
@@ -2924,6 +2987,7 @@ if (appRoot) {
         const assignmentKey = document.manual_assignment_key || document.assigned_checklist_key || inferAssignmentFromDocument(document);
         const uploadStatus = String(document.upload_status || 'uploaded');
         const isActive = documentIsActive(document);
+        const deleteBlocked = documentBlocksDeletion(document);
         const isSelected = state.selectedDocumentIds.includes(Number(document.id));
         const aiStatusTone = uploadStatus === 'queued'
             ? 'stage'
@@ -2955,7 +3019,7 @@ if (appRoot) {
 
         return `
             <tr class="crm-checklist-item-row">
-                <td><input type="checkbox" data-document-select="${document.id}" ${isSelected ? 'checked' : ''} ${isActive ? 'disabled' : ''}></td>
+                <td><input type="checkbox" data-document-select="${document.id}" ${isSelected ? 'checked' : ''} ${deleteBlocked ? 'disabled' : ''}></td>
                 <td>
                     <div class="crm-checklist-indent">
                         <div class="crm-table-primary">${escapeHtml(document.original_filename || 'Uploaded document')}</div>
@@ -2969,7 +3033,7 @@ if (appRoot) {
                 </td>
                 <td>${escapeHtml(String(detail || 'N/A'))}</td>
                 <td>${formatDateTime(document.uploaded_at)}</td>
-                <td>${uploadStatus === 'deleting' ? '<span class="crm-meta-text">Removing...</span>' : `<div class="crm-inline">${renderIconButton('preview', 'Preview document', `data-preview-document="${document.id}"`)}${renderIconButton('delete', 'Remove document', `data-delete-document="${document.id}" ${isActive ? 'disabled' : ''}`, 'crm-button--danger-ghost')}</div>`}</td>
+                <td>${uploadStatus === 'deleting' ? '<span class="crm-meta-text">Removing...</span>' : `<div class="crm-inline">${renderIconButton('preview', 'Preview document', `data-preview-document="${document.id}"`)}${renderIconButton('delete', 'Remove document', `data-delete-document="${document.id}" ${deleteBlocked ? 'disabled' : ''}`, 'crm-button--danger-ghost')}</div>`}</td>
             </tr>
         `;
     }
@@ -3023,6 +3087,7 @@ if (appRoot) {
         const labels = {
             ic: 'Identity Card',
             payslip: 'Payslips',
+            pension_slip: 'Pension Slips',
             epf: 'EPF Statements',
             ramci: 'RAMCI',
             ctos: 'CTOS',
@@ -3094,6 +3159,7 @@ if (appRoot) {
         const typePriority = {
             ic: 20,
             payslip: 30,
+            pension_slip: 35,
             epf: 40,
             ramci: 50,
             ctos: 60,
@@ -3559,6 +3625,7 @@ if (appRoot) {
         const labels = {
             ic: 'Upload IC',
             payslip: 'Upload Payslip',
+            pension_slip: 'Pension Slip',
             epf: 'Upload EPF',
             ramci: 'Upload RAMCI',
             ctos: 'Upload CTOS',

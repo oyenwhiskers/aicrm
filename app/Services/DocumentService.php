@@ -37,6 +37,11 @@ class DocumentService
                 'size' => $file->getSize(),
                 'mime_type' => $file->getMimeType(),
                 'public_url' => Storage::disk($disk)->url($path),
+                'queued_at' => now()->toIso8601String(),
+                'extraction_pipeline' => [
+                    'queue_wait_started_at' => now()->toIso8601String(),
+                    'gemini_slot_requeues' => 0,
+                ],
             ],
         ]);
     }

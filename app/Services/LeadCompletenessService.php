@@ -118,7 +118,7 @@ class LeadCompletenessService
         }
 
         foreach ($documents as $document) {
-            $documentType = data_get($document->metadata, 'effective_document_type') ?? $document->document_type->value;
+            $documentType = $this->resolvedDocumentType($document);
             $side = data_get($document->metadata, 'classification.ic_side');
 
             if ($documentType === DocumentType::IC->value && ! $this->documentNeedsReview($document)) {
@@ -137,7 +137,7 @@ class LeadCompletenessService
 
         $remainingIcDocuments = $documents
             ->filter(function ($document) use ($taken, $assigned) {
-                $documentType = data_get($document->metadata, 'effective_document_type') ?? $document->document_type->value;
+                $documentType = $this->resolvedDocumentType($document);
 
                 return $documentType === DocumentType::IC->value
                     && ! $this->documentNeedsReview($document)
@@ -159,7 +159,7 @@ class LeadCompletenessService
             }
 
             $document = $documents->first(function ($document) use ($singleKey, $taken) {
-                $documentType = data_get($document->metadata, 'effective_document_type') ?? $document->document_type->value;
+                $documentType = $this->resolvedDocumentType($document);
 
                 return $documentType === $singleKey
                     && ! $this->documentNeedsReview($document)
@@ -174,7 +174,7 @@ class LeadCompletenessService
 
         $payslips = $documents
             ->filter(function ($document) {
-                $documentType = data_get($document->metadata, 'effective_document_type') ?? $document->document_type->value;
+                $documentType = $this->resolvedDocumentType($document);
                 return $documentType === DocumentType::PAYSLIP->value
                     && ! $this->documentNeedsReview($document)
                     && filled(data_get($document->metadata, 'classification.statement_period'));
@@ -194,7 +194,7 @@ class LeadCompletenessService
 
         $epfDocuments = $documents
             ->filter(function ($document) {
-                $documentType = data_get($document->metadata, 'effective_document_type') ?? $document->document_type->value;
+                $documentType = $this->resolvedDocumentType($document);
                 return $documentType === DocumentType::EPF->value
                     && ! $this->documentNeedsReview($document)
                     && filled(data_get($document->metadata, 'classification.statement_year'));
@@ -229,7 +229,7 @@ class LeadCompletenessService
 
             $currentDate = \Carbon\Carbon::createFromFormat('Y-m', $period)->startOfMonth();
 
-            if ($previousDate && $previousDate->copy()->addMonth()->equalTo($currentDate)) {
+            if ($previousDate && $previousDate->diffInMonths($currentDate, false) === 1) {
                 $current[] = $document;
             } else {
                 $current = [$document];
@@ -261,8 +261,15 @@ class LeadCompletenessService
             'original_filename' => $document->original_filename,
             'uploaded_at' => $document->uploaded_at?->toIso8601String(),
             'storage_path' => $document->storage_path,
-            'document_type' => data_get($document->metadata, 'effective_document_type') ?? $document->document_type->value,
+            'document_type' => $this->resolvedDocumentType($document),
         ];
+    }
+
+    protected function resolvedDocumentType($document): string
+    {
+        return data_get($document->metadata, 'effective_document_type')
+            ?? data_get($document->metadata, 'classification.document_type')
+            ?? $document->document_type->value;
     }
 
     protected function checklistItemDetail(string $key, $document): ?string

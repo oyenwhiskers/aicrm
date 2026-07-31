@@ -279,7 +279,7 @@ Return valid JSON only with this exact shape:
     "confidence": "high|medium|low",
     "needs_review": true,
     "classification": {
-        "document_type": "ic|payslip|epf|ramci|ctos|other",
+        "document_type": "ic|payslip|pension_slip|epf|ramci|ctos|other",
         "ic_side": "front|back|null",
         "statement_year": null,
         "statement_month": null,
@@ -300,12 +300,13 @@ Return valid JSON only with this exact shape:
 }
 Rules:
 - Use null when a value is missing or unclear.
-- `document_type` must be one of: ic, payslip, epf, ramci, ctos, other.
+- `document_type` must be one of: ic, payslip, pension_slip, epf, ramci, ctos, other.
 - For IC, set `ic_side` to front or back when confident.
 - IC front usually shows the person's name, IC number, and identity details such as date of birth.
 - IC back should be recognized from reverse-side markers such as Touch 'n Go, chip text, "Ketua Pengarah Pendaftaran Negara", "Pendaftaran Negara", or other back-side printing. Do not require an address to classify it as back.
 - If the image looks like the blue patterned reverse side and the person's full name is not visible, prefer `ic_side = back` even when an address is absent.
 - For payslip, set `statement_period` to YYYY-MM when confident. Also set `statement_year` and `statement_month`.
+- Use `pension_slip` for pension statements or pension payment slips, including documents labeled with terms such as `pencen`, `pesara`, or retirement pension wording. Do not classify pension slips as `payslip`.
 - For EPF, set `statement_year` when confident.
 - Numeric fields must be numbers, not strings.
 - `needs_review` must be true if document type is unclear or any required classification detail is unclear.
