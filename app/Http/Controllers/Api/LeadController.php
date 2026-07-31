@@ -60,7 +60,14 @@ class LeadController extends Controller
                         ->orWhere('ic_number', 'like', "%{$search}%");
                 });
             })
-            ->latest()
+            ->when(
+                $request->string('sort')->toString() === 'name',
+                function ($query) use ($request) {
+                    $direction = strtolower($request->string('direction', 'asc')->toString()) === 'desc' ? 'desc' : 'asc';
+                    $query->orderByRaw('LOWER(name) ' . $direction);
+                },
+                fn ($query) => $query->latest()
+            )
             ->paginate($perPage)
             ->through(fn (Lead $lead) => $this->transformSummary($lead));
 

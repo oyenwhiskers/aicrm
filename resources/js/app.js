@@ -2,7 +2,9 @@ const appRoot = document.querySelector('#app');
 
 if (appRoot) {
     const apiBase = appRoot.dataset.apiBase || '/api';
-    const appName = appRoot.dataset.appName || 'AI CRM Nexus';
+    const appName = appRoot.dataset.appName || 'Leads Processing System (LPS)';
+    const appShortName = appRoot.dataset.appShortName || 'LPS';
+    const appTitle = appName.replace(/\s*\(LPS\)\s*$/i, '').trim() || appName;
     const page = appRoot.dataset.page || 'workspace';
     let intakeGlobalsBound = false;
     let workspaceGlobalsBound = false;
@@ -23,6 +25,8 @@ if (appRoot) {
 
     const state = {
         appName,
+        appShortName,
+        appTitle,
         page,
         loading: false,
         loadingLeads: false,
@@ -35,8 +39,14 @@ if (appRoot) {
         uploadingDocuments: false,
         modalBusyMessage: '',
         notices: [],
-        filters: { search: '', stage: '', date: '', recent: false },
+        filters: { search: '', stage: initialStageFilter(), date: '', recent: false },
+        leadSort: { field: '', direction: 'asc' },
         pagination: { total: 0, current_page: 1, last_page: 1 },
+        loadingDashboard: false,
+        dashboardLeads: [],
+        dashboardTodayTotal: 0,
+        dashboardTotal: 0,
+        confirmDialog: null,
         extractedRows: [],
         extractedSummary: null,
         sourceLabel: 'image extraction',
@@ -72,6 +82,10 @@ if (appRoot) {
             void restorePersistedIntakeBatch();
         }
 
+        if (state.page === 'dashboard') {
+            await loadDashboardData();
+        }
+
         if (state.page === 'workspace') {
             await loadLeads();
 
@@ -84,6 +98,15 @@ if (appRoot) {
     function initialLeadId() {
         const match = window.location.pathname.match(/^\/workspace\/leads\/(\d+)$/);
         return match ? Number(match[1]) : null;
+    }
+
+    function initialStageFilter() {
+        try {
+            const stage = new URLSearchParams(window.location.search).get('stage');
+            return stage ? stage.toUpperCase() : '';
+        } catch (error) {
+            return '';
+        }
     }
 
     function activeDocumentStatuses() {
@@ -801,6 +824,8 @@ if (appRoot) {
         }
 
         state.intakeImages = [];
+        state.extractedRows = [];
+        state.extractedSummary = null;
         resetIntakeBatchState();
         render();
     }
@@ -950,7 +975,7 @@ if (appRoot) {
             .map((row) => ({
                 name: (row.name || '').trim(),
                 phone_number: (row.phone_number || '').trim(),
-                source: row.source_image ? `${state.sourceLabel || 'image extraction'} · ${row.source_image}` : (state.sourceLabel || 'image extraction'),
+                source: row.source_image || state.sourceLabel || 'image extraction',
             }))
             .filter((row) => row.name && row.phone_number);
 
@@ -982,6 +1007,28 @@ if (appRoot) {
         }
     }
 
+    async function loadDashboardData() {
+        state.loadingDashboard = true;
+        render();
+
+        try {
+            const today = new Date().toISOString().slice(0, 10);
+            const [allPayload, todayPayload] = await Promise.all([
+                apiRequest('/leads?per_page=100'),
+                apiRequest(`/leads?per_page=100&date=${today}`),
+            ]);
+
+            state.dashboardLeads = allPayload.data || [];
+            state.dashboardTodayTotal = todayPayload.total || 0;
+            state.dashboardTotal = allPayload.total || 0;
+        } catch (error) {
+            pushNotice(error.message, 'error');
+        } finally {
+            state.loadingDashboard = false;
+            render();
+        }
+    }
+
     async function loadLeads(page = state.pagination.current_page || 1) {
         state.loadingLeads = true;
         render();
@@ -993,6 +1040,10 @@ if (appRoot) {
             if (state.filters.stage) params.set('stage', state.filters.stage);
             if (state.filters.date) params.set('date', state.filters.date);
             if (state.filters.recent) params.set('recent', '1');
+            if (state.leadSort.field) {
+                params.set('sort', state.leadSort.field);
+                params.set('direction', state.leadSort.direction);
+            }
 
             const payload = await apiRequest(`/leads?${params.toString()}`);
 
@@ -1134,12 +1185,21 @@ if (appRoot) {
         }
     }
 
-    async function deleteLeadDocument(documentId) {
+    function deleteLeadDocument(documentId) {
         if (!state.selectedLeadId) {
             return;
         }
 
-        if (!window.confirm('Delete this uploaded document?')) {
+        requestConfirm({
+            title: 'Delete Document',
+            message: 'Delete this uploaded document? This action cannot be undone.',
+            confirmLabel: 'Delete Document',
+            onConfirm: () => performDeleteLeadDocument(documentId),
+        });
+    }
+
+    async function performDeleteLeadDocument(documentId) {
+        if (!state.selectedLeadId) {
             return;
         }
 
@@ -1164,7 +1224,7 @@ if (appRoot) {
         }
     }
 
-    async function bulkDeleteLeadDocuments() {
+    function bulkDeleteLeadDocuments() {
         if (!state.selectedLeadId) {
             return;
         }
@@ -1178,7 +1238,16 @@ if (appRoot) {
             return;
         }
 
-        if (!window.confirm(`Delete ${selectedIds.length} selected document${selectedIds.length === 1 ? '' : 's'}?`)) {
+        requestConfirm({
+            title: 'Delete Documents',
+            message: `Delete ${selectedIds.length} selected document${selectedIds.length === 1 ? '' : 's'}? This action cannot be undone.`,
+            confirmLabel: `Delete ${selectedIds.length} Document${selectedIds.length === 1 ? '' : 's'}`,
+            onConfirm: () => performBulkDeleteLeadDocuments(selectedIds),
+        });
+    }
+
+    async function performBulkDeleteLeadDocuments(selectedIds) {
+        if (!state.selectedLeadId || !selectedIds.length) {
             return;
         }
 
@@ -1296,14 +1365,23 @@ if (appRoot) {
         }
     }
 
-    async function deleteLead(leadId) {
+    function deleteLead(leadId) {
         const normalizedLeadId = Number(leadId);
 
         if (!Number.isInteger(normalizedLeadId)) {
             return;
         }
 
-        if (!window.confirm('Delete this lead and all related documents?')) {
+        requestConfirm({
+            title: 'Delete Lead',
+            message: 'Delete this lead and all related documents? This action cannot be undone.',
+            confirmLabel: 'Delete Lead',
+            onConfirm: () => performDeleteLead(normalizedLeadId),
+        });
+    }
+
+    async function performDeleteLead(normalizedLeadId) {
+        if (!Number.isInteger(normalizedLeadId)) {
             return;
         }
 
@@ -1329,33 +1407,159 @@ if (appRoot) {
         }
     }
 
+    function requestConfirm({ title, message, confirmLabel = 'Confirm', cancelLabel = 'Cancel', tone = 'danger', onConfirm }) {
+        state.confirmDialog = { title, message, confirmLabel, cancelLabel, tone, onConfirm };
+        render();
+    }
+
+    function closeConfirmDialog() {
+        if (!state.confirmDialog) {
+            return;
+        }
+
+        state.confirmDialog = null;
+        render();
+    }
+
+    async function acceptConfirmDialog() {
+        const action = state.confirmDialog?.onConfirm;
+
+        state.confirmDialog = null;
+        render();
+
+        if (typeof action === 'function') {
+            await action();
+        }
+    }
+
+    function renderConfirmDialog() {
+        if (!state.confirmDialog) {
+            return '';
+        }
+
+        const { title, message, confirmLabel, cancelLabel, tone } = state.confirmDialog;
+        const confirmClass = tone === 'danger' ? 'crm-button crm-button--danger' : 'crm-button';
+
+        return `
+            <section class="crm-modal-backdrop crm-confirm-backdrop" data-action="confirm-cancel">
+                <div class="crm-card crm-card--solid crm-confirm-card" role="alertdialog" aria-modal="true" aria-labelledby="crm-confirm-title" aria-describedby="crm-confirm-message">
+                    <div class="crm-confirm-body">
+                        <h2 class="crm-confirm-title" id="crm-confirm-title">${escapeHtml(title)}</h2>
+                        <p class="crm-confirm-message" id="crm-confirm-message">${escapeHtml(message)}</p>
+                    </div>
+                    <div class="crm-confirm-actions">
+                        <button type="button" class="crm-button crm-button--ghost" data-action="confirm-cancel">${escapeHtml(cancelLabel)}</button>
+                        <button type="button" class="${confirmClass}" data-action="confirm-accept">${escapeHtml(confirmLabel)}</button>
+                    </div>
+                </div>
+            </section>
+        `;
+    }
+
     function render() {
         rememberModalScrollPosition();
 
         appRoot.innerHTML = `
-            <div class="crm-shell">
-                <header class="crm-topbar">
-                    <div class="crm-brand">
-                        <div class="crm-brand-mark">AI</div>
-                        <div>
-                            <p class="crm-eyebrow">AI-Assisted Loan CRM</p>
-                            <h1 class="crm-title">${escapeHtml(appName)}</h1>
-                            <p class="crm-subtitle">Two-stage operator flow: extract raw leads first, then process them inside the workspace.</p>
-                        </div>
+            <div class="crm-app">
+                ${renderSidebar()}
+                <div class="crm-main">
+                    ${renderPageTopbar()}
+                    <div class="crm-content crm-content--${state.page}">
+                        ${renderNotices()}
+                        ${renderPageContent()}
                     </div>
-                    <nav class="crm-inline">
-                        <a class="crm-button ${state.page === 'intake' ? '' : 'crm-button--ghost'}" href="/lead-intake">Lead Intake</a>
-                        <a class="crm-button ${state.page === 'workspace' ? '' : 'crm-button--ghost'}" href="/workspace">Workspace</a>
-                    </nav>
-                </header>
-
-                ${renderNotices()}
-                ${state.page === 'intake' ? renderIntakePage() : renderWorkspacePage()}
+                </div>
+                ${renderConfirmDialog()}
             </div>
         `;
 
         bindEvents();
         restoreModalScrollPosition();
+    }
+
+    function pageMeta() {
+        const pages = {
+            dashboard: {
+                title: 'Dashboard',
+                description: 'Overview of leads, pipeline activity, and recent intake.',
+            },
+            intake: {
+                title: 'Lead Intake',
+                description: 'Upload screenshots, review extracted rows, and import leads.',
+            },
+            workspace: {
+                title: 'Workspace',
+                description: 'Manage leads, documents, calculations, and bank matching.',
+            },
+        };
+
+        return pages[state.page] || pages.workspace;
+    }
+
+    function sidebarNavIcon(page) {
+        const icons = {
+            dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"></rect><rect x="14" y="3" width="7" height="5" rx="1.5"></rect><rect x="14" y="12" width="7" height="9" rx="1.5"></rect><rect x="3" y="16" width="7" height="5" rx="1.5"></rect>',
+            intake: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line>',
+            workspace: '<rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="9" x2="9" y2="20"></line>',
+        };
+
+        return `<svg class="crm-sidebar-link-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[page] || ''}</svg>`;
+    }
+
+    function renderSidebar() {
+        const navItems = [
+            { page: 'dashboard', href: '/dashboard', label: 'Dashboard' },
+            { page: 'intake', href: '/lead-intake', label: 'Lead Intake' },
+            { page: 'workspace', href: '/workspace', label: 'Workspace' },
+        ];
+
+        return `
+            <aside class="crm-sidebar">
+                <div class="crm-sidebar-brand">
+                    <div class="crm-brand-mark">${escapeHtml(appShortName)}</div>
+                    <div class="crm-sidebar-brand-copy">
+                        <strong>${escapeHtml(appTitle)}</strong>
+                    </div>
+                </div>
+                <nav class="crm-sidebar-nav" aria-label="Main navigation">
+                    ${navItems.map((item) => `
+                        <a class="crm-sidebar-link ${state.page === item.page ? 'is-active' : ''}" href="${item.href}">
+                            ${sidebarNavIcon(item.page)}
+                            <span class="crm-sidebar-link-label">${escapeHtml(item.label)}</span>
+                        </a>
+                    `).join('')}
+                </nav>
+                <div class="crm-sidebar-foot">
+                    <span class="crm-sidebar-foot-label">Operator flow</span>
+                    <span class="crm-sidebar-foot-note">Intake → Workspace → Process</span>
+                </div>
+            </aside>
+        `;
+    }
+
+    function renderPageTopbar() {
+        const meta = pageMeta();
+
+        return `
+            <header class="crm-page-topbar">
+                <div class="crm-page-topbar-copy">
+                    <h1 class="crm-page-title">${escapeHtml(meta.title)}</h1>
+                    <p class="crm-page-description">${escapeHtml(meta.description)}</p>
+                </div>
+            </header>
+        `;
+    }
+
+    function renderPageContent() {
+        if (state.page === 'dashboard') {
+            return renderDashboardPage();
+        }
+
+        if (state.page === 'intake') {
+            return renderIntakePage();
+        }
+
+        return renderWorkspacePage();
     }
 
     function renderNotices() {
@@ -1377,117 +1581,486 @@ if (appRoot) {
         `;
     }
 
-    function renderIntakePage() {
+    function renderDashboardPage() {
+        if (state.loadingDashboard) {
+            return '<section class="crm-dashboard-page"><div class="crm-empty crm-empty--compact"><strong>Loading dashboard...</strong><span>Fetching lead summary.</span></div></section>';
+        }
+
+        const leads = state.dashboardLeads || [];
+        const sampleSize = leads.length;
+        const isSampled = state.dashboardTotal > sampleSize;
+        const stageCounts = aggregateStageCounts(leads);
+        const docsPending = leads.filter((lead) => (lead.documents_count ?? 0) === 0).length;
+        const processedCount = leads.filter((lead) => ['PROCESSED', 'MATCHED', 'NOT_ELIGIBLE', 'MANUAL_REVIEW'].includes(lead.stage)).length;
+        const recentCount = leads.filter((lead) => isRecentLead(lead.created_at)).length;
+        const sampleNote = isSampled ? `Of latest ${sampleSize} loaded` : null;
+
         return `
-            <section class="crm-intake-page crm-intake-layout">
-                ${state.intakeDragActive ? '<div class="crm-intake-overlay"><strong>Drop image files anywhere</strong><span>YKN CRM will add them to the intake queue automatically.</span></div>' : ''}
+            <section class="crm-dashboard-page">
+                <div class="crm-metric-grid">
+                    ${renderMetricCard("Today's Leads", state.dashboardTodayTotal, 'Imported today')}
+                    ${renderMetricCard('Total Leads', state.dashboardTotal, 'All records')}
+                    ${renderMetricCard('Docs Pending', docsPending, sampleNote || 'Awaiting documents')}
+                    ${renderMetricCard('Processed', processedCount, sampleNote || 'Calculated or matched')}
+                </div>
 
-                <section class="crm-card crm-card--solid crm-intake-header-card">
-                    <div class="crm-card-body crm-intake-header-body">
-                        <div>
-                            <p class="crm-eyebrow">Lead Intake</p>
-                            <h2 class="crm-intake-title">Add screenshots, extract rows, then review before import.</h2>
-                            <p class="crm-card-note">Paste, drag, or upload image files. The page supports multiple screenshots in one batch.</p>
-                        </div>
-                        <div class="crm-intake-header-meta">
-                            <span class="crm-badge" data-tone="stage">${state.intakeImages.length} queued</span>
-                            <span class="crm-badge" data-tone="neutral">${state.extractedRows.length} extracted</span>
-                        </div>
-                    </div>
-                </section>
-
-                <section class="crm-card crm-card--solid crm-intake-section">
-                    <div class="crm-card-head">
-                        <div>
-                            <h2 class="crm-card-title">Upload</h2>
-                            <p class="crm-card-note">Add screenshots from clipboard, drag and drop, or file picker.</p>
-                        </div>
-                    </div>
-                    <div class="crm-card-body">
-                    <div class="crm-intake-capture crm-form-grid">
-                        <input id="lead-image-input" type="file" name="image" accept="image/*" multiple hidden>
-                        <button type="button" class="crm-intake-surface ${state.intakeImages.length ? 'is-ready' : ''}" data-action="pick-image" ${state.loading ? 'disabled' : ''}>
-                            <span class="crm-dropzone-icon">${state.intakeImages.length ? state.intakeImages.length : '+'}</span>
-                            <span class="crm-intake-surface-copy">
-                                <strong>${state.intakeImages.length ? `${state.intakeImages.length} image${state.intakeImages.length === 1 ? '' : 's'} ready` : 'Click, paste, or drop screenshots anywhere'}</strong>
-                                <span>${state.intakeImages.length ? 'Extraction starts automatically after new images are added.' : 'Supports screenshots, exported chats, and raw lead list images.'}</span>
-                            </span>
-                        </button>
-
-                        <div class="crm-intake-queue ${state.intakeImages.length ? '' : 'is-empty'}">
-                            ${state.intakeImages.length ? state.intakeImages.map((image) => `
-                                <article class="crm-queue-item">
-                                    <div class="crm-queue-item-main">
-                                        <strong>${escapeHtml(image.name)}</strong>
-                                        <span>${escapeHtml(image.method.replace('-', ' '))}</span>
-                                        ${renderIntakeImageProgress(image)}
-                                    </div>
-                                    <button type="button" class="crm-button crm-button--ghost crm-button--small" data-remove-image="${image.id}" ${state.loading ? 'disabled' : ''}>Remove</button>
-                                </article>
-                            `).join('') : '<div class="crm-empty"><strong>No images queued</strong><span>Paste, drag, or upload one or more images to begin.</span></div>'}
-                        </div>
-
-                        <div class="crm-intake-footer-row">
-                            <div class="crm-intake-progress">
-                                ${state.loading ? `
-                                    <span class="crm-spinner" aria-hidden="true"></span>
-                                    <p class="crm-footer-note">Extracting image data. Please wait...</p>
-                                ` : '<p class="crm-footer-note">Use clear screenshots where each row shows a name and phone number. Extraction starts automatically after upload, paste, or drop.</p>'}
-                            </div>
-                            <div class="crm-intake-footer-actions">
-                                <button type="button" class="crm-button crm-button--ghost" data-action="clear-image" ${state.loading || !state.intakeImages.length ? 'disabled' : ''}>Reset Intake</button>
+                <div class="crm-dashboard-grid">
+                    <section class="crm-card crm-card--solid crm-dashboard-card">
+                        <div class="crm-card-head">
+                            <div>
+                                <h2 class="crm-card-title">Pipeline By Stage</h2>
+                                <p class="crm-card-note">${isSampled ? `Across the latest ${sampleSize} leads.` : 'Distribution across all leads.'}</p>
                             </div>
                         </div>
-                        ${renderIntakePerformanceInsights()}
-                    </div>
-                    </div>
-                </section>
-
-                <section class="crm-card crm-card--solid crm-intake-section">
-                    <div class="crm-card-head">
-                        <div>
-                            <h2 class="crm-card-title">Extracted Leads</h2>
-                            <p class="crm-card-note">Review and correct the extracted names and phone numbers before importing.</p>
-                        </div>
-                        ${state.extractedRows.length ? `<span class="crm-badge" data-tone="stage">${state.extractedRows.length} rows</span>` : ''}
-                    </div>
-                    <div class="crm-card-body crm-stack">
-                        ${state.extractedSummary ? `<div class="crm-inline-summary">${escapeHtml(state.extractedSummary)}</div>` : ''}
-                        ${state.extractedRows.length ? `
-                            <div class="crm-intake-list">
-                                ${state.extractedRows.map((row, index) => `
-                                    <article class="crm-intake-card">
-                                        <div class="crm-intake-card-head">
-                                            <div>
-                                                <strong>Lead ${index + 1}</strong>
-                                                ${row.source_image ? `<div class="crm-meta-text">${escapeHtml(row.source_image)}</div>` : ''}
+                        <div class="crm-card-body">
+                            ${stageCounts.length ? `
+                                <div class="crm-pipeline-list">
+                                    ${stageCounts.map((item) => `
+                                        <a class="crm-pipeline-row" href="/workspace?stage=${encodeURIComponent(item.stage)}">
+                                            <div class="crm-pipeline-row-head">
+                                                <span class="crm-badge crm-badge--compact" data-tone="${stageTone(item.stage)}">${escapeHtml(item.label)}</span>
+                                                <strong>${item.count}</strong>
                                             </div>
-                                            <button type="button" class="crm-button crm-button--ghost crm-button--small" data-remove-row="${index}">Remove</button>
-                                        </div>
-                                        <div class="crm-field">
-                                            <label>Name</label>
-                                            <input class="crm-input" data-row-index="${index}" data-row-field="name" value="${escapeHtml(row.name || '')}">
-                                        </div>
-                                        <div class="crm-field">
-                                            <label>Phone Number</label>
-                                            <input class="crm-input" data-row-index="${index}" data-row-field="phone_number" value="${escapeHtml(row.phone_number || '')}">
-                                        </div>
-                                        <div class="crm-chip-row">
-                                            <span class="crm-badge" data-tone="${stageTone(row.confidence)}">${escapeHtml((row.confidence || 'medium').toUpperCase())}</span>
-                                            ${row.notes ? `<span class="crm-meta-text">${escapeHtml(row.notes)}</span>` : ''}
-                                        </div>
-                                    </article>
-                                `).join('')}
+                                            <div class="crm-pipeline-bar" aria-hidden="true">
+                                                <span style="width: ${item.percent}%"></span>
+                                            </div>
+                                        </a>
+                                    `).join('')}
+                                </div>
+                            ` : '<div class="crm-empty crm-empty--compact"><strong>No pipeline data yet</strong><span>Import leads from intake to populate this view.</span></div>'}
+                        </div>
+                    </section>
+
+                    <section class="crm-card crm-card--solid crm-dashboard-card">
+                        <div class="crm-card-head">
+                            <div>
+                                <h2 class="crm-card-title">Recent Leads</h2>
+                                <p class="crm-card-note">${recentCount && recentCount < sampleSize ? `${recentCount} added in the last 24 hours.` : 'Latest imported leads.'}</p>
                             </div>
-                            <div class="crm-inline">
-                                <button type="button" class="crm-button" data-action="import-extracted" ${state.loading ? 'disabled' : ''}>Create Leads From Extraction</button>
-                                <a class="crm-button crm-button--ghost" href="/workspace">Go To Workspace</a>
-                            </div>
-                        ` : '<div class="crm-empty"><strong>No extracted rows yet.</strong><span>Paste, drag, or upload a screenshot to start intake.</span></div>'}
-                    </div>
-                </section>
+                            <a class="crm-button crm-button--ghost crm-button--small" href="/workspace">View All</a>
+                        </div>
+                        <div class="crm-card-body crm-stack">
+                            ${leads.length ? renderDashboardRecentLeads(leads.slice(0, 8)) : '<div class="crm-empty crm-empty--compact"><strong>No leads yet</strong><span>Start with Lead Intake to create your first records.</span></div>'}
+                        </div>
+                    </section>
+                </div>
             </section>
         `;
+    }
+
+    function renderMetricCard(label, value, note) {
+        return `
+            <article class="crm-metric-card">
+                <span class="crm-metric-label">${escapeHtml(label)}</span>
+                <strong class="crm-metric-value">${escapeHtml(String(value ?? 0))}</strong>
+                <span class="crm-metric-note">${escapeHtml(note)}</span>
+            </article>
+        `;
+    }
+
+    function renderDashboardRecentLeads(leads) {
+        return `
+            <div class="crm-table crm-table--compact crm-dashboard-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Name</th>
+                            <th>Stage</th>
+                            <th>Docs</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${leads.map((lead) => `
+                            <tr class="crm-table-row-clickable" data-view-lead="${lead.id}">
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(lead.name)}</div>
+                                    <div class="crm-meta-text">${escapeHtml(lead.phone_number || 'No phone')}</div>
+                                </td>
+                                <td><span class="crm-badge crm-badge--compact" data-tone="${stageTone(lead.stage)}">${escapeHtml(formatStageLabel(lead.stage))}</span></td>
+                                <td>${lead.documents_count ?? 0}</td>
+                                <td><span class="crm-meta-text">${escapeHtml(formatRelativeTime(lead.created_at))}</span></td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    function formatStageLabel(stage) {
+        return String(stage || 'Unknown')
+            .replaceAll('_', ' ')
+            .toLowerCase()
+            .replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+
+    function formatRelativeTime(value) {
+        if (!value) return 'N/A';
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return String(value);
+
+        const diffMs = Date.now() - date.getTime();
+        const diffMin = Math.round(diffMs / 60000);
+
+        if (diffMin < 1) return 'Just now';
+        if (diffMin < 60) return `${diffMin}m ago`;
+
+        const diffHours = Math.round(diffMin / 60);
+        if (diffHours < 24) return `${diffHours}h ago`;
+
+        const diffDays = Math.round(diffHours / 24);
+        if (diffDays < 7) return `${diffDays}d ago`;
+
+        return new Intl.DateTimeFormat('en-MY', {
+            day: '2-digit',
+            month: 'short',
+        }).format(date);
+    }
+
+    function aggregateStageCounts(leads) {
+        const counts = {};
+
+        leads.forEach((lead) => {
+            const key = lead.stage || 'UNKNOWN';
+            counts[key] = (counts[key] || 0) + 1;
+        });
+
+        const total = leads.length || 1;
+
+        return Object.entries(counts)
+            .map(([stage, count]) => ({
+                stage,
+                label: formatStageLabel(stage),
+                count,
+                percent: Math.max(8, Math.round((count / total) * 100)),
+            }))
+            .sort((left, right) => right.count - left.count);
+    }
+
+    function isRecentLead(value) {
+        if (!value) {
+            return false;
+        }
+
+        const createdAt = new Date(value);
+        const dayAgo = Date.now() - (24 * 60 * 60 * 1000);
+
+        return createdAt.getTime() >= dayAgo;
+    }
+
+    function intakeExtractionInProgress() {
+        if (state.loading) {
+            return true;
+        }
+
+        return (state.intakeImages || []).some((image) => {
+            const status = image.extractionStatus || 'queued';
+
+            return status === 'queued' || status === 'processing' || status === 'retrying';
+        });
+    }
+
+    function intakeUploadStatusLabel() {
+        const images = state.intakeImages || [];
+
+        if (!images.length) {
+            return null;
+        }
+
+        const statusCounts = images.reduce((counts, image) => {
+            const status = image.extractionStatus || 'queued';
+            counts[status] = (counts[status] || 0) + 1;
+
+            return counts;
+        }, {});
+
+        if (statusCounts.failed) {
+            return {
+                label: `${statusCounts.failed} failed`,
+                tone: 'failed',
+            };
+        }
+
+        if (statusCounts.retrying) {
+            return {
+                label: `${statusCounts.retrying} retrying`,
+                tone: 'stage',
+            };
+        }
+
+        if (statusCounts.processing) {
+            return {
+                label: `${statusCounts.processing} processing`,
+                tone: 'stage',
+            };
+        }
+
+        if (statusCounts.queued) {
+            return {
+                label: `${statusCounts.queued} queued`,
+                tone: 'neutral',
+            };
+        }
+
+        if (statusCounts.completed === images.length) {
+            return null;
+        }
+
+        const doneCount = statusCounts.completed || 0;
+
+        return {
+            label: `${doneCount} done`,
+            tone: 'matched',
+        };
+    }
+
+    function intakeReviewConfidenceMeta() {
+        const rows = state.extractedRows || [];
+
+        if (!rows.length) {
+            return { hideConfidence: false, sharedConfidence: null, summaryLabel: null };
+        }
+
+        const confidences = rows.map((row) => String(row.confidence || 'medium').toLowerCase());
+        const uniqueConfidences = [...new Set(confidences)];
+
+        if (uniqueConfidences.length !== 1) {
+            return { hideConfidence: false, sharedConfidence: null, summaryLabel: null };
+        }
+
+        const sharedConfidence = uniqueConfidences[0];
+
+        return {
+            hideConfidence: true,
+            sharedConfidence,
+            summaryLabel: `All ${sharedConfidence} confidence`,
+        };
+    }
+
+    function shouldShowIntakeReviewSummary() {
+        if (!state.extractedSummary) {
+            return false;
+        }
+
+        if (state.extractedRows.length > 0 && state.intakeBatchStatus === 'completed') {
+            return false;
+        }
+
+        return true;
+    }
+
+    function renderIntakeReviewMeta() {
+        const { hideSource, sharedSource } = intakeReviewSourceMeta();
+        const { hideConfidence, summaryLabel } = intakeReviewConfidenceMeta();
+        const parts = [];
+
+        if (hideSource && sharedSource) {
+            parts.push(escapeHtml(sharedSource));
+        }
+
+        if (hideConfidence && summaryLabel) {
+            parts.push(escapeHtml(summaryLabel));
+        }
+
+        if (!parts.length) {
+            return '';
+        }
+
+        return `<p class="crm-intake-review-meta">${parts.join(' · ')}</p>`;
+    }
+
+    function intakeReviewSourceMeta() {
+        const rows = state.extractedRows || [];
+        const sources = rows
+            .map((row) => row.source_image || '')
+            .filter(Boolean);
+
+        if (!sources.length) {
+            return { hideSource: false, sharedSource: null };
+        }
+
+        const uniqueSources = [...new Set(sources)];
+
+        if (uniqueSources.length === 1) {
+            return { hideSource: true, sharedSource: uniqueSources[0] };
+        }
+
+        return { hideSource: false, sharedSource: null };
+    }
+
+    function renderIntakePage() {
+        const importLabel = state.extractedRows.length === 1
+            ? 'Import 1 Lead'
+            : `Import ${state.extractedRows.length} Leads`;
+        const showUploadHelper = state.extractedRows.length === 0 || intakeExtractionInProgress();
+
+        return `
+            <section class="crm-intake-page crm-intake-layout">
+                ${state.intakeDragActive ? '<div class="crm-intake-overlay"><strong>Drop image files anywhere</strong><span>LPS will add them to the intake queue automatically.</span></div>' : ''}
+
+                <aside class="crm-intake-capture-rail ${state.intakeImages.length ? '' : 'crm-intake-capture-rail--empty'}">
+                    <section class="crm-card crm-card--solid crm-intake-section crm-intake-upload-card">
+                        <div class="crm-card-head">
+                            <div>
+                                <h2 class="crm-card-title">Upload</h2>
+                                <p class="crm-card-note">${state.intakeImages.length ? 'Paste, drag, or drop to add more.' : 'Paste, drag, or drop screenshots.'}</p>
+                            </div>
+                            <div class="crm-card-head-actions">
+                                ${state.intakeImages.length ? `<button type="button" class="crm-button crm-button--ghost crm-button--small" data-action="clear-image" ${state.loading ? 'disabled' : ''}>Reset</button>` : ''}
+                            </div>
+                        </div>
+                        <div class="crm-card-body">
+                            <div class="crm-intake-capture">
+                                <input id="lead-image-input" type="file" name="image" accept="image/*" multiple hidden>
+                                ${state.intakeImages.length ? '' : `
+                                    <button type="button" class="crm-intake-surface crm-intake-surface--empty" data-action="pick-image" ${state.loading ? 'disabled' : ''}>
+                                        <span class="crm-dropzone-icon" aria-hidden="true">
+                                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                                                <polyline points="17 8 12 3 7 8"></polyline>
+                                                <line x1="12" y1="3" x2="12" y2="15"></line>
+                                            </svg>
+                                        </span>
+                                        <span class="crm-intake-surface-copy">
+                                            <strong>Drop or select screenshots</strong>
+                                            <span>Chat exports and lead lists supported.</span>
+                                            <span class="crm-intake-surface-tip">Include name and phone in each row.</span>
+                                        </span>
+                                    </button>
+                                `}
+
+                                ${state.intakeImages.length ? `
+                                    <div class="crm-intake-queue">
+                                        ${state.intakeImages.map((image) => `
+                                            <article class="crm-queue-item">
+                                                <div class="crm-queue-item-main">
+                                                    <strong title="${escapeHtml(image.name)}">${escapeHtml(image.name)}</strong>
+                                                    ${renderIntakeImageProgress(image, { extrasOnly: true })}
+                                                </div>
+                                                <div class="crm-queue-item-aside">
+                                                    ${renderIntakeImageProgress(image, { badgeOnly: true })}
+                                                    <button type="button" class="crm-button crm-button--ghost crm-button--small crm-queue-remove" data-remove-image="${image.id}" ${state.loading ? 'disabled' : ''} aria-label="Remove file ${escapeHtml(image.name)}">Remove file</button>
+                                                </div>
+                                            </article>
+                                        `).join('')}
+                                    </div>
+                                    <div class="crm-intake-add-row">
+                                        <button type="button" class="crm-button crm-button--ghost crm-button--small" data-action="pick-image" ${state.loading ? 'disabled' : ''}>
+                                            <span class="crm-intake-add-icon" aria-hidden="true">+</span>
+                                            Add more
+                                        </button>
+                                    </div>
+                                ` : ''}
+
+                                ${showUploadHelper && state.intakeImages.length ? '<div class="crm-intake-footer-row"><p class="crm-footer-note">Include name and phone in each row.</p></div>' : ''}
+                                ${renderIntakePerformanceInsights()}
+                            </div>
+                        </div>
+                    </section>
+                </aside>
+
+                <div class="crm-intake-review-panel">
+                    <section class="crm-card crm-card--solid crm-intake-section crm-intake-review-card">
+                        <div class="crm-card-head">
+                            <div>
+                                <h2 class="crm-card-title">Extracted Leads</h2>
+                                <p class="crm-card-note">Review and correct before import.</p>
+                            </div>
+                            <div class="crm-card-head-actions">
+                                <span class="crm-badge" data-tone="neutral">${state.extractedRows.length} extracted</span>
+                            </div>
+                        </div>
+                        <div class="crm-intake-review-body">
+                            ${shouldShowIntakeReviewSummary() ? `<div class="crm-inline-summary">${escapeHtml(state.extractedSummary)}</div>` : ''}
+                            ${state.extractedRows.length ? renderIntakeReviewRows() : `
+                                <div class="crm-empty crm-empty--compact crm-intake-review-empty">
+                                    <span class="crm-empty-icon" aria-hidden="true">
+                                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                            <rect x="3" y="3" width="18" height="18" rx="3"></rect>
+                                            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                            <path d="M21 15l-4.5-4.5L5 21"></path>
+                                        </svg>
+                                    </span>
+                                    <strong>No extracted rows yet</strong>
+                                    <span>Upload a screenshot to start extraction.</span>
+                                </div>
+                            `}
+                        </div>
+                        ${state.extractedRows.length ? `
+                            <div class="crm-intake-review-actions">
+                                <button type="button" class="crm-button" data-action="import-extracted" ${state.loading ? 'disabled' : ''}>${importLabel}</button>
+                                <a class="crm-button crm-button--ghost" href="/workspace">Go To Workspace</a>
+                            </div>
+                        ` : ''}
+                    </section>
+                </div>
+            </section>
+        `;
+    }
+
+    function renderIntakeReviewRows() {
+        const { hideSource } = intakeReviewSourceMeta();
+        const { hideConfidence } = intakeReviewConfidenceMeta();
+        const tableModifiers = [
+            hideSource ? 'crm-intake-review-table--no-source' : '',
+            hideConfidence ? 'crm-intake-review-table--no-confidence' : '',
+        ].filter(Boolean);
+        const tableClass = ['crm-intake-review-table', ...tableModifiers].join(' ');
+
+        return `
+            ${renderIntakeReviewMeta()}
+            <div class="${tableClass}" role="table" aria-label="Extracted leads">
+                <div class="crm-intake-review-head" role="row">
+                    <span role="columnheader">#</span>
+                    <span role="columnheader">Name</span>
+                    <span role="columnheader">Phone</span>
+                    ${hideConfidence ? '' : '<span role="columnheader">Confidence</span>'}
+                    ${hideSource ? '' : '<span role="columnheader">Source</span>'}
+                    <span role="columnheader" class="crm-intake-review-head-action">Actions</span>
+                </div>
+                <div class="crm-intake-review-rows">
+                    ${state.extractedRows.map((row, index) => `
+                        <article class="crm-intake-review-row" role="row">
+                            <span class="crm-intake-review-num" role="cell">${index + 1}</span>
+                            <input
+                                class="crm-input crm-intake-review-input"
+                                type="text"
+                                data-row-index="${index}"
+                                data-row-field="name"
+                                value="${escapeHtml(row.name || '')}"
+                                placeholder="Name"
+                                aria-label="Name for lead ${index + 1}"
+                            >
+                            <input
+                                class="crm-input crm-intake-review-input"
+                                type="text"
+                                data-row-index="${index}"
+                                data-row-field="phone_number"
+                                value="${escapeHtml(row.phone_number || '')}"
+                                placeholder="Phone"
+                                aria-label="Phone for lead ${index + 1}"
+                            >
+                            ${hideConfidence ? '' : `
+                                <span class="crm-intake-review-confidence" role="cell" aria-label="Confidence ${escapeHtml(row.confidence || 'medium')}">
+                                    <span class="crm-badge crm-badge--compact" data-tone="${stageTone(row.confidence)}">${escapeHtml((row.confidence || 'medium').toUpperCase())}</span>
+                                </span>
+                            `}
+                            ${hideSource ? '' : `
+                                <span class="crm-intake-review-source" role="cell" title="${escapeHtml(row.source_image || row.notes || '')}">
+                                    ${row.source_image ? escapeHtml(row.source_image) : row.notes ? escapeHtml(row.notes) : '—'}
+                                </span>
+                            `}
+                            <button type="button" class="crm-button crm-button--ghost crm-button--small crm-intake-review-remove" data-remove-row="${index}" aria-label="Remove lead ${index + 1}">Remove</button>
+                        </article>
+                    `).join('')}
+                </div>
+            </div>
+        `;
+    }
+
+    function hasActiveFilters() {
+        return Boolean(state.filters.search || state.filters.stage || state.filters.date || state.filters.recent);
     }
 
     function renderWorkspacePage() {
@@ -1495,26 +2068,19 @@ if (appRoot) {
             <section class="crm-workspace-page crm-stack">
                 <section class="crm-card crm-card--solid">
                     <div class="crm-card-body">
-                        <form id="filter-form" class="crm-filter-grid">
-                            <div class="crm-field crm-filter-search">
-                                <label for="search">Search</label>
-                                <input class="crm-input" id="search" name="search" value="${escapeHtml(state.filters.search)}" placeholder="Search by name, phone, or IC">
+                        <form id="filter-form" class="crm-toolbar">
+                            <div class="crm-toolbar-search">
+                                <input class="crm-input" id="search" name="search" value="${escapeHtml(state.filters.search)}" placeholder="Search name, phone, or IC" aria-label="Search leads">
                             </div>
-                            <div class="crm-field">
-                                <label for="stage-filter">Stage</label>
-                                <select class="crm-select" id="stage-filter" name="stage">${renderStageOptions(state.filters.stage, true)}</select>
-                            </div>
-                            <div class="crm-field">
-                                <label for="date-filter">Date Added</label>
-                                <input class="crm-input" id="date-filter" name="date" type="date" value="${escapeHtml(state.filters.date)}">
-                            </div>
-                            <div class="crm-filter-actions">
-                                <label class="crm-toggle">
-                                    <input type="checkbox" id="recent-filter" name="recent" ${state.filters.recent ? 'checked' : ''}>
-                                    <span>Recent 15 min</span>
-                                </label>
-                                <button type="button" class="crm-button crm-button--ghost" data-action="clear-filters">Clear</button>
-                            </div>
+                            <select class="crm-select crm-toolbar-control" id="stage-filter" name="stage" aria-label="Filter by stage">
+                                ${renderStageOptions(state.filters.stage, true)}
+                            </select>
+                            <input class="crm-input crm-toolbar-control" id="date-filter" name="date" type="date" value="${escapeHtml(state.filters.date)}" aria-label="Filter by date">
+                            <label class="crm-toggle crm-toolbar-toggle">
+                                <input type="checkbox" id="recent-filter" name="recent" ${state.filters.recent ? 'checked' : ''}>
+                                <span>Recent</span>
+                            </label>
+                            ${hasActiveFilters() ? `<button type="button" class="crm-button crm-button--ghost crm-button--small crm-toolbar-clear" data-action="clear-filters" aria-label="Clear filters" title="Clear filters">&times;</button>` : ''}
                         </form>
                     </div>
                 </section>
@@ -1530,7 +2096,8 @@ if (appRoot) {
         `;
     }
 
-    function renderIntakeImageProgress(image) {
+    function renderIntakeImageProgress(image, options = {}) {
+        const { badgeOnly = false, extrasOnly = false } = options;
         const status = image.extractionStatus || 'queued';
         const tone = status === 'completed'
             ? 'matched'
@@ -1542,7 +2109,7 @@ if (appRoot) {
                     ? 'stage'
                     : 'neutral';
         const label = status === 'completed'
-            ? `Done${image.extractedRowCount ? ` · ${image.extractedRowCount} row${image.extractedRowCount === 1 ? '' : 's'}` : ''}`
+            ? 'Done'
             : status === 'failed'
                 ? 'Failed'
                 : status === 'retrying'
@@ -1550,17 +2117,43 @@ if (appRoot) {
                 : status === 'processing'
                     ? 'Processing'
                     : 'Queued';
+
+        const badge = `<span class="crm-badge crm-badge--compact" data-tone="${tone}">${escapeHtml(label)}</span>`;
+
+        if (badgeOnly) {
+            return badge;
+        }
+
         const timingDetails = intakeImageTimingDetails(image);
         const pipelineSummary = renderIntakeImagePipeline(image);
         const preprocessSummary = renderIntakeImagePreprocess(image);
+        const hasTechnicalDetails = Boolean(pipelineSummary || timingDetails || preprocessSummary);
+        const showDetails = status === 'failed' || status === 'retrying';
+
+        const extras = (status === 'failed' || status === 'retrying') ? `
+            <div class="crm-queue-progress crm-queue-progress--compact">
+                ${image.extractionError ? `<span class="crm-queue-error">${escapeHtml(image.extractionError)}</span>` : ''}
+                ${hasTechnicalDetails && showDetails ? `
+                    <details class="crm-queue-details">
+                        <summary>Details</summary>
+                        <div class="crm-queue-details-body">
+                            ${pipelineSummary}
+                            ${timingDetails ? `<span class="crm-meta-text">${escapeHtml(timingDetails)}</span>` : ''}
+                            ${preprocessSummary}
+                        </div>
+                    </details>
+                ` : ''}
+            </div>
+        ` : '';
+
+        if (extrasOnly) {
+            return extras;
+        }
 
         return `
-            <div class="crm-queue-progress">
-                <span class="crm-badge" data-tone="${tone}">${escapeHtml(label)}</span>
-                ${pipelineSummary}
-                ${timingDetails ? `<span class="crm-meta-text">${escapeHtml(timingDetails)}</span>` : ''}
-                ${preprocessSummary}
-                ${(status === 'failed' || status === 'retrying') && image.extractionError ? `<span class="crm-queue-error">${escapeHtml(image.extractionError)}</span>` : ''}
+            <div class="crm-queue-progress crm-queue-progress--compact">
+                ${badge}
+                ${extras}
             </div>
         `;
     }
@@ -1637,19 +2230,21 @@ if (appRoot) {
         }
 
         return `
-            <div class="crm-intake-performance-card">
-                <div class="crm-intake-performance-head">
-                    <strong>Infrastructure Insights</strong>
-                    ${dominantStage ? `<span class="crm-badge" data-tone="review">Bottleneck ${escapeHtml(dominantStage)}</span>` : ''}
+            <details class="crm-intake-performance-details">
+                <summary class="crm-intake-performance-summary">
+                    <span>Infrastructure insights</span>
+                </summary>
+                <div class="crm-intake-performance-card">
+                    ${dominantStage ? `<p class="crm-meta-text">Bottleneck: ${escapeHtml(dominantStage)}</p>` : ''}
+                    ${serialBatchProcessing ? `<span class="crm-meta-text">Serial batch processing detected: later images waited behind earlier ones.</span>` : ''}
+                    <div class="crm-intake-performance-grid">
+                        ${items.map((item) => `
+                            <span class="crm-badge crm-badge--compact" data-tone="${item.tone}">${escapeHtml(`${item.label} ${item.value}`)}</span>
+                        `).join('')}
+                    </div>
+                    ${performance?.recommendation ? `<p class="crm-card-note">${escapeHtml(performance.recommendation)}</p>` : ''}
                 </div>
-                ${serialBatchProcessing ? `<span class="crm-meta-text">Serial batch processing detected: this batch used one worker for multiple images, so later images waited behind earlier ones.</span>` : ''}
-                <div class="crm-intake-performance-grid">
-                    ${items.map((item) => `
-                        <span class="crm-badge" data-tone="${item.tone}">${escapeHtml(`${item.label} ${item.value}`)}</span>
-                    `).join('')}
-                </div>
-                ${performance?.recommendation ? `<p class="crm-card-note">${escapeHtml(performance.recommendation)}</p>` : ''}
-            </div>
+            </details>
         `;
     }
 
@@ -1895,6 +2490,30 @@ if (appRoot) {
         return `${normalized.toFixed(precision)} ${units[unitIndex]}`;
     }
 
+    function renderLeadSortIndicator(field) {
+        if (state.leadSort.field !== field) {
+            return '<span class="crm-table-sort-indicator" aria-hidden="true">↕</span>';
+        }
+
+        return state.leadSort.direction === 'asc'
+            ? '<span class="crm-table-sort-indicator" aria-hidden="true">↑</span>'
+            : '<span class="crm-table-sort-indicator" aria-hidden="true">↓</span>';
+    }
+
+    function toggleLeadSort(field) {
+        if (state.leadSort.field !== field) {
+            state.leadSort = { field, direction: 'asc' };
+        } else {
+            state.leadSort = {
+                field,
+                direction: state.leadSort.direction === 'asc' ? 'desc' : 'asc',
+            };
+        }
+
+        state.pagination.current_page = 1;
+        void loadLeads();
+    }
+
     function renderLeadTable() {
         if (state.loadingLeads) {
             return '<div class="crm-empty"><strong>Loading leads...</strong><span>The database is being refreshed.</span></div>';
@@ -1909,27 +2528,34 @@ if (appRoot) {
                 <table>
                     <thead>
                         <tr>
-                            <th>Lead</th>
+                            <th>
+                                <button type="button" class="crm-table-sort ${state.leadSort.field === 'name' ? 'is-active' : ''}" data-sort-field="name" aria-label="Sort leads by name">
+                                    <span>Lead</span>
+                                    ${renderLeadSortIndicator('name')}
+                                </button>
+                            </th>
                             <th>Phone</th>
                             <th>Stage</th>
-                            <th>Documents</th>
+                            <th>Docs</th>
+                            <th>Source</th>
                             <th>Updated</th>
-                            <th>Action</th>
+                            <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                         ${state.leads.map((lead) => `
-                            <tr>
+                            <tr class="crm-table-row-clickable" data-view-lead="${lead.id}">
                                 <td>
                                     <div class="crm-table-primary">${escapeHtml(lead.name)}</div>
                                     <div class="crm-meta-text">${lead.ic_number ? escapeHtml(lead.ic_number) : 'IC pending'}</div>
                                 </td>
                                 <td>${escapeHtml(lead.phone_number || 'N/A')}</td>
-                                <td><span class="crm-badge" data-tone="${stageTone(lead.stage)}">${escapeHtml(lead.stage.replaceAll('_', ' '))}</span></td>
+                                <td><span class="crm-badge crm-badge--compact" data-tone="${stageTone(lead.stage)}">${escapeHtml(String(lead.stage || '').replaceAll('_', ' '))}</span></td>
                                 <td>${lead.documents_count ?? 0}</td>
+                                <td class="crm-table-source">${escapeHtml(formatLeadSourceDisplay(lead.source))}</td>
                                 <td>${formatDateTime(lead.updated_at)}</td>
                                 <td>
-                                    <div class="crm-inline crm-inline--center">
+                                    <div class="crm-inline crm-inline--center crm-table-actions" data-stop-row-click>
                                         ${renderLeadWhatsAppAction(lead.phone_number)}
                                         ${renderIconButton('view', 'View lead', `data-view-lead="${lead.id}"`)}
                                         ${renderIconButton('delete', 'Delete lead', `data-delete-lead="${lead.id}"`, 'crm-button--danger-ghost')}
@@ -2027,7 +2653,7 @@ if (appRoot) {
                     </div>
                     <div class="crm-modal-header-panel">
                         <div class="crm-modal-header-topbar">
-                            <button type="button" class="crm-button crm-button--ghost crm-button--small" data-action="close-modal">Close</button>
+                            <button type="button" class="crm-button crm-button--ghost crm-button--small crm-modal-close" data-action="close-modal" aria-label="Close" title="Close">&times;</button>
                         </div>
                     </div>
                 </div>
@@ -2071,47 +2697,56 @@ if (appRoot) {
             <section class="crm-stack crm-document-stage" data-document-stage-dropzone>
                 ${state.documentStageDragActive ? '<div class="crm-document-stage-overlay"><strong>Drop documents anywhere in this stage</strong><span>The files will upload and process automatically.</span></div>' : ''}
                 <section class="crm-card crm-card--solid">
-                    <div class="crm-card-head"><div><h3 class="crm-card-title">Upload Section</h3><p class="crm-card-note">Drop or select multiple files. The system will auto-detect IC, payslip, EPF, RAMCI, and CTOS, then update the checklist.</p></div><span class="crm-badge" data-tone="${lead.document_completeness?.is_complete ? 'matched' : lead.document_completeness?.has_review_items ? 'review' : 'stage'}">${lead.document_completeness?.received_required_slot_count || 0}/${lead.document_completeness?.required_document_slot_count || 0} matched</span></div>
+                    <div class="crm-card-head"><div><h3 class="crm-card-title">Upload</h3><p class="crm-card-note">Auto-detects IC, payslip, EPF, RAMCI, and CTOS, then updates the checklist.</p></div><span class="crm-badge" data-tone="${lead.document_completeness?.is_complete ? 'matched' : lead.document_completeness?.has_review_items ? 'review' : 'stage'}">${lead.document_completeness?.received_required_slot_count || 0}/${lead.document_completeness?.required_document_slot_count || 0} matched</span></div>
                     <div class="crm-card-body crm-stack">
                         <div class="crm-bulk-upload" data-document-dropzone>
                             <input id="lead-document-input" type="file" accept="image/*,.pdf" multiple hidden>
-                            <button type="button" class="crm-intake-surface ${state.uploadingDocuments ? 'is-ready' : ''}" data-action="pick-documents" ${state.uploadingDocuments ? 'disabled' : ''}>
-                                <span class="crm-dropzone-icon">+</span>
-                                <span class="crm-intake-surface-copy">
-                                    <strong>${state.uploadingDocuments ? 'Uploading and processing documents...' : 'Add documents in one upload'}</strong>
-                                    <span>${state.uploadingDocuments ? 'Please wait while the checklist is updated.' : 'Supports drag and drop or file picker. AI processing starts automatically after upload.'}</span>
+                            <button type="button" class="crm-doc-dropzone ${state.uploadingDocuments ? 'is-busy' : ''}" data-action="pick-documents" ${state.uploadingDocuments ? 'disabled' : ''}>
+                                <span class="crm-doc-dropzone-icon" aria-hidden="true">
+                                    ${state.uploadingDocuments
+                                        ? '<span class="crm-spinner"></span>'
+                                        : '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"></path><path d="m7 9 5-5 5 5"></path><path d="M5 16v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2"></path></svg>'}
                                 </span>
+                                <span class="crm-doc-dropzone-copy">
+                                    <strong>${state.uploadingDocuments ? 'Uploading and processing documents...' : 'Drag and drop files or click to upload'}</strong>
+                                    <span>${state.uploadingDocuments ? 'Please wait while the checklist is updated.' : 'AI processing starts automatically after upload.'}</span>
+                                </span>
+                                ${state.uploadingDocuments ? '' : `
+                                    <span class="crm-doc-dropzone-types">
+                                        <span class="crm-doc-type-chip">JPG</span>
+                                        <span class="crm-doc-type-chip">JPEG</span>
+                                        <span class="crm-doc-type-chip">PNG</span>
+                                        <span class="crm-doc-type-chip">WEBP</span>
+                                        <span class="crm-doc-type-chip">PDF</span>
+                                    </span>
+                                `}
                             </button>
                         </div>
-                        <div class="crm-intake-progress">
-                            ${state.uploadingDocuments ? `
-                                <span class="crm-spinner" aria-hidden="true"></span>
-                                <p class="crm-footer-note">Uploading files and running AI classification. This can take a moment.</p>
-                            ` : '<p class="crm-footer-note">You can drop files anywhere in this document stage.</p>'}
-                        </div>
-                        <p class="crm-footer-note">Accepted files: JPG, JPEG, PNG, WEBP, and PDF.</p>
                     </div>
                 </section>
 
                 <section class="crm-card crm-card--solid">
-                    <div class="crm-card-head"><div><h3 class="crm-card-title">Checklist Section</h3><p class="crm-card-note">Calculation unlocks only when every checklist item is complete and nothing is marked for review.</p></div></div>
+                    ${renderChecklistCardHead(completenessItems)}
                     <div class="crm-card-body crm-table">
                         <table class="crm-checklist-table">
                             <thead>
                                 <tr>
                                     <th>Requirement</th>
-                                    <th>Detected File</th>
-                                    <th>Detail</th>
                                     <th>Status</th>
+                                    <th>File / Detail</th>
                                     <th>Action</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 ${completenessItems.map((item) => `
                                     <tr class="crm-checklist-group-row">
-                                        <td colspan="5">
+                                        <td colspan="4">
                                             <div class="crm-checklist-group-head">
-                                                <strong>${escapeHtml(item.label)}</strong>
+                                                <div class="crm-checklist-group-copy">
+                                                    <strong>${escapeHtml(item.label)}</strong>
+                                                    ${item.is_complete ? '' : `<span class="crm-meta-text">${escapeHtml(renderChecklistGroupNote(item))}</span>`}
+                                                </div>
+                                                <span class="crm-checklist-group-progress">${renderChecklistGroupProgress(item)}</span>
                                             </div>
                                         </td>
                                     </tr>
@@ -2122,8 +2757,8 @@ if (appRoot) {
                     </div>
                 </section>
 
-                <section class="crm-card crm-card--solid">
-                    <div class="crm-card-head"><div><h3 class="crm-card-title">Uploaded Documents Section</h3><p class="crm-card-note">Review detected type, confidence, and checklist assignment. Use manual reassignment when AI gets it wrong.</p></div></div>
+                <section id="crm-uploaded-files" class="crm-card crm-card--solid crm-document-stage-last">
+                    <div class="crm-card-head"><div><h3 class="crm-card-title">Uploaded files</h3><p class="crm-card-note">Review AI detection and correct checklist assignment when needed.</p></div></div>
                     <div class="crm-card-body crm-table">
                         ${orderedDocuments.length ? `
                             ${renderUploadedDocumentBulkToolbar(orderedDocuments)}
@@ -2133,10 +2768,39 @@ if (appRoot) {
                                     ${renderUploadedDocumentRows(orderedDocuments, extractedByDocumentId)}
                                 </tbody>
                             </table>
-                        ` : '<div class="crm-empty"><strong>No documents uploaded yet.</strong><span>Add files in the upload section to let the checklist start filling automatically.</span></div>'}
+                        ` : '<div class="crm-empty"><strong>No documents uploaded yet.</strong><span>Uploaded files will appear here after processing.</span></div>'}
                     </div>
                 </section>
             </section>
+        `;
+    }
+
+    function computeChecklistSummary(completenessItems) {
+        const slots = (completenessItems || []).flatMap((item) => item.slots || []);
+
+        return {
+            total: slots.length,
+            complete: slots.filter((slot) => slot.is_complete).length,
+            missing: slots.filter((slot) => slot.is_missing).length,
+            review: slots.filter((slot) => slot.needs_review).length,
+        };
+    }
+
+    function renderChecklistCardHead(completenessItems) {
+        const summary = computeChecklistSummary(completenessItems);
+
+        return `
+            <div class="crm-card-head crm-card-head--checklist">
+                <div class="crm-checklist-head-copy">
+                    <h3 class="crm-card-title">Checklist</h3>
+                    <p class="crm-card-note">Track required documents and completion status for this lead.</p>
+                    <div class="crm-checklist-summary">
+                        <span class="crm-checklist-metric" data-tone="matched"><strong>${summary.complete}</strong><span>/ ${summary.total} documents complete</span></span>
+                        <span class="crm-checklist-metric" data-tone="missing"><strong>${summary.missing}</strong><span>Missing</span></span>
+                        <span class="crm-checklist-metric" data-tone="review"><strong>${summary.review}</strong><span>Need review</span></span>
+                    </div>
+                </div>
+            </div>
         `;
     }
 
@@ -2152,8 +2816,51 @@ if (appRoot) {
         return `${item.missing_count} required file${item.missing_count === 1 ? '' : 's'} still missing.`;
     }
 
+    function renderChecklistGroupProgress(item) {
+        const completeCount = (item.slots || []).filter((slot) => slot.is_complete).length;
+        const requiredCount = item.required_count ?? (item.slots || []).length;
+
+        return `${completeCount} / ${requiredCount} complete`;
+    }
+
+    function renderChecklistFileDetail(slot) {
+        if (!slot.document) {
+            return '<span class="crm-meta-text crm-checklist-empty">No file yet</span>';
+        }
+
+        const filename = escapeHtml(slot.document.original_filename);
+        const detail = slot.detail ? escapeHtml(slot.detail) : '';
+
+        if (detail) {
+            return `
+                <div class="crm-checklist-file-detail">
+                    <div class="crm-table-primary">${filename}</div>
+                    <div class="crm-meta-text">${detail}</div>
+                </div>
+            `;
+        }
+
+        return `<div class="crm-checklist-file-detail"><div class="crm-table-primary">${filename}</div></div>`;
+    }
+
+    function renderChecklistRowAction(slot) {
+        if (slot.is_complete && slot.document) {
+            return renderIconButton('preview', 'Preview document', `data-preview-document="${slot.document.id}"`);
+        }
+
+        if (slot.needs_review && slot.document) {
+            return `<button type="button" class="crm-button crm-button--ghost crm-button--small" data-action="scroll-to-uploaded-files">Review</button>`;
+        }
+
+        if (slot.is_missing) {
+            return `<button type="button" class="crm-button crm-button--ghost crm-button--small" data-action="pick-documents" ${state.uploadingDocuments ? 'disabled' : ''}>Upload</button>`;
+        }
+
+        return '<span class="crm-meta-text">-</span>';
+    }
+
     function renderChecklistTableRow(slot) {
-        const tone = slot.is_complete ? 'matched' : slot.needs_review ? 'review' : slot.is_missing ? 'failed' : 'stage';
+        const tone = slot.is_complete ? 'matched' : slot.needs_review ? 'review' : slot.is_missing ? 'neutral' : 'stage';
         const status = slot.is_complete ? 'Complete' : slot.needs_review ? 'Needs review' : slot.is_missing ? 'Missing' : 'Pending';
 
         return `
@@ -2163,10 +2870,9 @@ if (appRoot) {
                         <div class="crm-table-primary">${escapeHtml(slot.label)}</div>
                     </div>
                 </td>
-                <td><div class="crm-checklist-indent">${slot.document ? escapeHtml(slot.document.original_filename) : '<span class="crm-meta-text">Waiting for matching upload.</span>'}</div></td>
-                <td><div class="crm-checklist-indent">${slot.detail ? escapeHtml(slot.detail) : '<span class="crm-meta-text">N/A</span>'}</div></td>
-                <td><span class="crm-badge" data-tone="${tone}">${status}</span></td>
-                <td>${slot.document ? renderIconButton('preview', 'Preview document', `data-preview-document="${slot.document.id}"`) : '<span class="crm-meta-text">-</span>'}</td>
+                <td><span class="crm-badge crm-badge--status" data-tone="${tone}">${status}</span></td>
+                <td><div class="crm-checklist-indent">${renderChecklistFileDetail(slot)}</div></td>
+                <td>${renderChecklistRowAction(slot)}</td>
             </tr>
         `;
     }
@@ -2568,9 +3274,41 @@ if (appRoot) {
             });
         });
 
+        document.querySelectorAll('[data-sort-field]').forEach((button) => {
+            button.addEventListener('click', () => {
+                toggleLeadSort(button.dataset.sortField);
+            });
+        });
+
         document.querySelectorAll('[data-view-lead]').forEach((element) => {
-            element.addEventListener('click', async () => {
+            if (element.classList.contains('crm-table-row-clickable')) {
+                return;
+            }
+
+            element.addEventListener('click', async (event) => {
+                event.stopPropagation();
                 await loadLead(element.dataset.viewLead);
+            });
+        });
+
+        document.querySelectorAll('.crm-table-row-clickable').forEach((row) => {
+            row.addEventListener('click', async (event) => {
+                if (event.target.closest('[data-stop-row-click], a, button')) {
+                    return;
+                }
+
+                const leadId = row.dataset.viewLead;
+
+                if (!leadId) {
+                    return;
+                }
+
+                if (state.page === 'dashboard') {
+                    window.location.href = `/workspace/leads/${leadId}`;
+                    return;
+                }
+
+                await loadLead(leadId);
             });
         });
 
@@ -2591,8 +3329,30 @@ if (appRoot) {
             event.stopPropagation();
         });
 
+        document.querySelector('.crm-confirm-card')?.addEventListener('click', (event) => {
+            event.stopPropagation();
+        });
+
+        document.querySelectorAll('[data-action="confirm-cancel"]').forEach((element) => {
+            element.addEventListener('click', (event) => {
+                event.preventDefault();
+                closeConfirmDialog();
+            });
+        });
+
+        document.querySelector('[data-action="confirm-accept"]')?.addEventListener('click', async (event) => {
+            event.preventDefault();
+            await acceptConfirmDialog();
+        });
+
         document.querySelectorAll('[data-action="pick-documents"]').forEach((button) => {
             button.addEventListener('click', () => document.querySelector('#lead-document-input')?.click());
+        });
+
+        document.querySelectorAll('[data-action="scroll-to-uploaded-files"]').forEach((button) => {
+            button.addEventListener('click', () => {
+                document.querySelector('#crm-uploaded-files')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
         });
 
         document.querySelector('#lead-document-input')?.addEventListener('change', async (event) => {
@@ -2704,7 +3464,16 @@ if (appRoot) {
         workspaceGlobalsBound = true;
 
         document.addEventListener('keydown', (event) => {
-            if (event.key === 'Escape' && state.selectedLeadId) {
+            if (event.key !== 'Escape') {
+                return;
+            }
+
+            if (state.confirmDialog) {
+                closeConfirmDialog();
+                return;
+            }
+
+            if (state.selectedLeadId) {
                 closeLeadModal();
             }
         });
@@ -2836,6 +3605,20 @@ if (appRoot) {
         const amount = Number(value);
         if (Number.isNaN(amount)) return String(value);
         return new Intl.NumberFormat('en-MY', { style: 'currency', currency: 'MYR', maximumFractionDigits: 2 }).format(amount);
+    }
+
+    function formatLeadSourceDisplay(source) {
+        if (!source) {
+            return '—';
+        }
+
+        const separatorIndex = source.indexOf(' · ');
+        if (separatorIndex !== -1) {
+            const filename = source.slice(separatorIndex + 3).trim();
+            return filename || source;
+        }
+
+        return source;
     }
 
     function formatDateTime(value) {
