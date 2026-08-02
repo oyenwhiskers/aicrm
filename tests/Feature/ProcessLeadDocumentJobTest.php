@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Contracts\DocumentIntelligenceServiceInterface;
 use App\Enums\ExtractionStatus;
 use App\Enums\LeadStage;
 use App\Models\Lead;
@@ -35,6 +36,9 @@ class ProcessLeadDocumentJobTest extends TestCase
         $geminiConcurrency->shouldReceive('acquireGlobal')->once()->andReturn(null);
         $geminiConcurrency->shouldReceive('slotRequeueDelaySeconds')->once()->andReturn(7);
 
+        $documentIntelligence = Mockery::mock(DocumentIntelligenceServiceInterface::class);
+        $documentIntelligence->shouldReceive('requiresSharedGeminiSlot')->once()->andReturn(true);
+
         $extractionService = Mockery::mock(ExtractionService::class);
         $extractionService->shouldNotReceive('extract');
 
@@ -42,6 +46,7 @@ class ProcessLeadDocumentJobTest extends TestCase
             $extractionService,
             app(ActivityLogService::class),
             $geminiConcurrency,
+            $documentIntelligence,
         );
 
         $metadata = $document->fresh()->metadata;
@@ -62,6 +67,9 @@ class ProcessLeadDocumentJobTest extends TestCase
         $geminiConcurrency->shouldReceive('acquireGlobal')->once()->andReturn($lease);
         $geminiConcurrency->shouldReceive('release')->once()->with($lease);
 
+        $documentIntelligence = Mockery::mock(DocumentIntelligenceServiceInterface::class);
+        $documentIntelligence->shouldReceive('requiresSharedGeminiSlot')->once()->andReturn(true);
+
         $extractionService = Mockery::mock(ExtractionService::class);
         $result = new class {
             public ExtractionStatus $extraction_status;
@@ -77,6 +85,7 @@ class ProcessLeadDocumentJobTest extends TestCase
             $extractionService,
             app(ActivityLogService::class),
             $geminiConcurrency,
+            $documentIntelligence,
         );
 
         $this->assertSame('uploaded', $document->fresh()->upload_status->value);
@@ -94,6 +103,9 @@ class ProcessLeadDocumentJobTest extends TestCase
         $geminiConcurrency->shouldReceive('acquireGlobal')->once()->andReturn($lease);
         $geminiConcurrency->shouldReceive('release')->once()->with($lease);
 
+        $documentIntelligence = Mockery::mock(DocumentIntelligenceServiceInterface::class);
+        $documentIntelligence->shouldReceive('requiresSharedGeminiSlot')->once()->andReturn(true);
+
         $extractionService = Mockery::mock(ExtractionService::class);
         $extractionService->shouldReceive('extract')->once()->andThrow(new \RuntimeException('Gemini failed.'));
 
@@ -101,6 +113,7 @@ class ProcessLeadDocumentJobTest extends TestCase
             $extractionService,
             app(ActivityLogService::class),
             $geminiConcurrency,
+            $documentIntelligence,
         );
 
         $this->assertSame('failed', $document->fresh()->upload_status->value);
@@ -123,6 +136,45 @@ class ProcessLeadDocumentJobTest extends TestCase
             data_get($document->metadata, 'extraction_pipeline.processing_error')
         );
         $this->assertTrue((bool) data_get($document->metadata, 'extraction_pipeline.failed_by_worker'));
+    }
+
+    public function test_python_provider_processes_without_shared_gemini_slot(): void
+    {
+        Storage::fake('public');
+        config()->set('services.document_intelligence.provider', 'python');
+
+        $document = $this->createQueuedDocument();
+        $job = new ProcessLeadDocumentJob($document->id);
+
+        $geminiConcurrency = Mockery::mock(GeminiConcurrencyService::class);
+        $geminiConcurrency->shouldNotReceive('acquireGlobal');
+        $geminiConcurrency->shouldNotReceive('release');
+
+        $documentIntelligence = Mockery::mock(DocumentIntelligenceServiceInterface::class);
+        $documentIntelligence->shouldReceive('requiresSharedGeminiSlot')->once()->andReturn(false);
+
+        $extractionService = Mockery::mock(ExtractionService::class);
+        $result = new class {
+            public ExtractionStatus $extraction_status;
+
+            public function __construct()
+            {
+                $this->extraction_status = ExtractionStatus::REVIEW_REQUIRED;
+            }
+        };
+        $extractionService->shouldReceive('extract')->once()->andReturn($result);
+
+        $job->handle(
+            $extractionService,
+            app(ActivityLogService::class),
+            $geminiConcurrency,
+            $documentIntelligence,
+        );
+
+        $document = $document->fresh();
+
+        $this->assertSame('uploaded', $document->upload_status->value);
+        $this->assertSame('python', data_get($document->metadata, 'extraction_pipeline.provider'));
     }
 
     protected function createQueuedDocument()

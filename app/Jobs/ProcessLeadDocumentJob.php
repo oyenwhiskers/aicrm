@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Contracts\DocumentIntelligenceServiceInterface;
 use App\Enums\ExtractionStatus;
 use App\Enums\UploadStatus;
 use App\Models\LeadDocument;
@@ -43,6 +44,7 @@ class ProcessLeadDocumentJob implements ShouldQueue
         ExtractionService $extractionService,
         ActivityLogService $activityLogService,
         GeminiConcurrencyService $geminiConcurrencyService,
+        DocumentIntelligenceServiceInterface $documentIntelligenceService,
     ): void
     {
         $document = LeadDocument::query()
@@ -53,31 +55,38 @@ class ProcessLeadDocumentJob implements ShouldQueue
             return;
         }
 
-        $geminiLease = $geminiConcurrencyService->acquireGlobal();
+        $provider = config('services.document_intelligence.provider', 'gemini');
+        $geminiLease = null;
 
-        if (! $geminiLease) {
-            $metadata = $this->markSlotRequeue($document);
-            $delaySeconds = $geminiConcurrencyService->slotRequeueDelaySeconds();
+        if ($documentIntelligenceService->requiresSharedGeminiSlot()) {
+            $geminiLease = $geminiConcurrencyService->acquireGlobal();
 
-            Log::info('document_gemini_slot_unavailable', [
-                'event' => 'document_gemini_slot_unavailable',
-                'document_id' => $document->id,
-                'lead_id' => $document->lead_id,
-                'requeue_count' => data_get($metadata, 'extraction_pipeline.gemini_slot_requeues', 0),
-                'delay_seconds' => $delaySeconds,
-            ]);
+            if (! $geminiLease) {
+                $metadata = $this->markSlotRequeue($document, $provider);
+                $delaySeconds = $geminiConcurrencyService->slotRequeueDelaySeconds();
 
-            $this->release($delaySeconds);
+                Log::info('document_gemini_slot_unavailable', [
+                    'event' => 'document_gemini_slot_unavailable',
+                    'document_id' => $document->id,
+                    'lead_id' => $document->lead_id,
+                    'provider' => $provider,
+                    'requeue_count' => data_get($metadata, 'extraction_pipeline.gemini_slot_requeues', 0),
+                    'delay_seconds' => $delaySeconds,
+                ]);
 
-            return;
+                $this->release($delaySeconds);
+
+                return;
+            }
         }
 
-        $metadata = $this->markProcessingStarted($document);
+        $metadata = $this->markProcessingStarted($document, $provider, $geminiLease !== null);
 
-        Log::info('document_gemini_slot_acquired', [
-            'event' => 'document_gemini_slot_acquired',
+        Log::info($geminiLease ? 'document_gemini_slot_acquired' : 'document_processing_started', [
+            'event' => $geminiLease ? 'document_gemini_slot_acquired' : 'document_processing_started',
             'document_id' => $document->id,
             'lead_id' => $document->lead_id,
+            'provider' => $provider,
             'queue_wait_seconds' => data_get($metadata, 'extraction_pipeline.queue_wait_seconds'),
         ]);
 
@@ -127,7 +136,9 @@ class ProcessLeadDocumentJob implements ShouldQueue
                 ],
             );
         } finally {
-            $geminiConcurrencyService->release($geminiLease);
+            if ($geminiLease) {
+                $geminiConcurrencyService->release($geminiLease);
+            }
             RefreshLeadDocumentStateJob::dispatch($document->lead_id);
         }
     }
@@ -178,7 +189,7 @@ class ProcessLeadDocumentJob implements ShouldQueue
         RefreshLeadDocumentStateJob::dispatch($document->lead_id);
     }
 
-    protected function markSlotRequeue(LeadDocument $document): array
+    protected function markSlotRequeue(LeadDocument $document, string $provider): array
     {
         $metadata = $document->metadata ?? [];
         $queuedAt = data_get($metadata, 'queued_at') ?? $document->uploaded_at?->toIso8601String() ?? $document->created_at?->toIso8601String();
@@ -186,6 +197,7 @@ class ProcessLeadDocumentJob implements ShouldQueue
         data_set($metadata, 'extraction_pipeline.queue_wait_started_at', data_get($metadata, 'extraction_pipeline.queue_wait_started_at', $queuedAt));
         data_set($metadata, 'extraction_pipeline.gemini_slot_requeues', (int) data_get($metadata, 'extraction_pipeline.gemini_slot_requeues', 0) + 1);
         data_set($metadata, 'extraction_pipeline.last_slot_requeue_at', now()->toIso8601String());
+        data_set($metadata, 'extraction_pipeline.provider', $provider);
 
         $document->forceFill([
             'upload_status' => UploadStatus::QUEUED,
@@ -195,7 +207,7 @@ class ProcessLeadDocumentJob implements ShouldQueue
         return $metadata;
     }
 
-    protected function markProcessingStarted(LeadDocument $document): array
+    protected function markProcessingStarted(LeadDocument $document, string $provider, bool $geminiSlotAcquired): array
     {
         $metadata = $document->metadata ?? [];
         $processingStartedAt = now();
@@ -206,7 +218,11 @@ class ProcessLeadDocumentJob implements ShouldQueue
         data_set($metadata, 'extraction_pipeline.queue_wait_started_at', data_get($metadata, 'extraction_pipeline.queue_wait_started_at', $queuedAt));
         data_set($metadata, 'extraction_pipeline.processing_started_at', $processingStartedAt->toIso8601String());
         data_set($metadata, 'extraction_pipeline.queue_wait_seconds', $queueStart ? max(0, $queueStart->diffInSeconds($processingStartedAt)) : null);
-        data_set($metadata, 'extraction_pipeline.gemini_slot_acquired_at', $processingStartedAt->toIso8601String());
+        data_set($metadata, 'extraction_pipeline.provider', $provider);
+
+        if ($geminiSlotAcquired) {
+            data_set($metadata, 'extraction_pipeline.gemini_slot_acquired_at', $processingStartedAt->toIso8601String());
+        }
 
         $document->forceFill([
             'upload_status' => UploadStatus::PROCESSING,

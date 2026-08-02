@@ -63,4 +63,29 @@ return [
         'intake_adaptive_overload_threshold' => (int) env('GEMINI_INTAKE_ADAPTIVE_OVERLOAD_THRESHOLD', 3),
     ],
 
+    'document_intelligence' => [
+        'provider' => env('DOCUMENT_INTELLIGENCE_PROVIDER', 'gemini'),
+        'shared_storage' => [
+            'enabled_disks' => array_values(array_filter(array_map(
+                static fn ($value) => trim($value),
+                explode(',', (string) env('DOCUMENT_INTELLIGENCE_SHARED_STORAGE_ENABLED_DISKS', 'public')),
+            ))),
+            'disk_roots' => [
+                'public' => env('DOCUMENT_INTELLIGENCE_SHARED_STORAGE_PUBLIC_ROOT', storage_path('app/public')),
+            ],
+        ],
+        'python' => [
+            'base_url' => env('PYTHON_DOCUMENT_INTELLIGENCE_BASE_URL'),
+            'extract_path' => env('PYTHON_DOCUMENT_INTELLIGENCE_EXTRACT_PATH', '/extract'),
+            'timeout' => (int) env('PYTHON_DOCUMENT_INTELLIGENCE_TIMEOUT', 60),
+            'verify_ssl' => env('PYTHON_DOCUMENT_INTELLIGENCE_VERIFY_SSL', true),
+            'token' => env('PYTHON_DOCUMENT_INTELLIGENCE_TOKEN'),
+            'image_preprocess_max_dimension' => (int) env('PYTHON_DOCUMENT_INTELLIGENCE_IMAGE_PREPROCESS_MAX_DIMENSION', 2200),
+            'image_preprocess_size_threshold_bytes' => (int) env('PYTHON_DOCUMENT_INTELLIGENCE_IMAGE_PREPROCESS_SIZE_THRESHOLD_BYTES', 2097152),
+            'image_preprocess_jpeg_quality' => (int) env('PYTHON_DOCUMENT_INTELLIGENCE_IMAGE_PREPROCESS_JPEG_QUALITY', 82),
+            'image_preprocess_webp_quality' => (int) env('PYTHON_DOCUMENT_INTELLIGENCE_IMAGE_PREPROCESS_WEBP_QUALITY', 82),
+            'image_preprocess_png_compression' => (int) env('PYTHON_DOCUMENT_INTELLIGENCE_IMAGE_PREPROCESS_PNG_COMPRESSION', 6),
+        ],
+    ],
+
 ];

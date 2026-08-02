@@ -2,13 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Contracts\DocumentIntelligenceServiceInterface;
 use App\Enums\ExtractionStatus;
 use App\Enums\LeadStage;
 use App\Models\Lead;
-use App\Services\DocumentPreprocessService;
 use App\Services\DocumentService;
 use App\Services\ExtractionService;
-use App\Services\GeminiExtractionService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
@@ -49,7 +48,8 @@ class LeadExtractionWorkflowTest extends TestCase
     public function test_it_retries_with_original_when_optimized_image_needs_review(): void
     {
         Storage::fake('public');
-        config()->set('services.gemini.api_key', 'test-key');
+        config()->set('services.document_intelligence.shared_storage.enabled_disks', ['public']);
+        config()->set('services.document_intelligence.shared_storage.disk_roots.public', storage_path('framework/testing/disks/public'));
 
         $lead = Lead::query()->create([
             'name' => 'Retry Lead',
@@ -66,23 +66,30 @@ class LeadExtractionWorkflowTest extends TestCase
             null,
         );
 
-        $originalPayload = Storage::disk('public')->get($document->storage_path);
-        $originalBase64 = base64_encode($originalPayload);
         $callCount = 0;
 
-        $mock = Mockery::mock(GeminiExtractionService::class);
-        $mock->shouldReceive('extract')
+        $mock = Mockery::mock(DocumentIntelligenceServiceInterface::class);
+        $mock->shouldReceive('isConfigured')
+            ->once()
+            ->andReturn(true);
+        $mock->shouldReceive('extractDocument')
             ->twice()
-            ->withArgs(function (?string $mimeType, string $payload) use (&$callCount, $originalBase64): bool {
+            ->withArgs(function (array $payload) use (&$callCount, $document): bool {
                 $callCount++;
 
                 if ($callCount === 1) {
-                    return $mimeType === 'image/jpeg'
-                        && strlen($payload) < strlen($originalBase64);
+                    return ($payload['mime_type'] ?? null) === 'image/jpeg'
+                        && ($payload['storage_disk'] ?? null) === 'public'
+                        && ($payload['storage_path'] ?? null) === $document->storage_path
+                        && ($payload['payload'] ?? null) === null
+                        && ($payload['mode'] ?? null) === 'primary';
                 }
 
-                return $mimeType === 'image/jpeg'
-                    && $payload === $originalBase64;
+                return ($payload['mime_type'] ?? null) === 'image/jpeg'
+                    && ($payload['storage_disk'] ?? null) === 'public'
+                    && ($payload['storage_path'] ?? null) === $document->storage_path
+                    && ($payload['payload'] ?? null) === null
+                    && ($payload['mode'] ?? null) === 'fallback_original';
             })
             ->andReturn(
                 [
@@ -112,7 +119,7 @@ class LeadExtractionWorkflowTest extends TestCase
                 ],
             );
 
-        $this->app->instance(GeminiExtractionService::class, $mock);
+        $this->app->instance(DocumentIntelligenceServiceInterface::class, $mock);
 
         $record = app(ExtractionService::class)->extract($document->fresh());
 
@@ -124,16 +131,19 @@ class LeadExtractionWorkflowTest extends TestCase
 
         $metadata = $document->fresh()->metadata;
 
-        $this->assertTrue((bool) data_get($metadata, 'document_preprocess.applied'));
+        $this->assertSame('shared_storage', data_get($metadata, 'document_processing_handoff.type'));
+        $this->assertSame('public', data_get($metadata, 'document_processing_handoff.storage_disk'));
         $this->assertTrue((bool) data_get($metadata, 'extraction_pipeline.fallback.triggered'));
         $this->assertSame('needs_review', data_get($metadata, 'extraction_pipeline.fallback.reason'));
-        $this->assertSame('original', data_get($metadata, 'extraction_pipeline.input_source'));
+        $this->assertSame('shared_storage', data_get($metadata, 'extraction_pipeline.input_source'));
         $this->assertCount(2, data_get($metadata, 'extraction_pipeline.attempts', []));
     }
 
-    public function test_document_preprocessing_skips_pdf_and_preserves_original_file(): void
+    public function test_python_shared_storage_failure_is_marked_for_review_without_worker_crash(): void
     {
         Storage::fake('public');
+        config()->set('services.document_intelligence.shared_storage.enabled_disks', ['public']);
+        config()->set('services.document_intelligence.shared_storage.disk_roots.public', storage_path('framework/testing/disks/public'));
 
         $lead = Lead::query()->create([
             'name' => 'Pdf Lead',
@@ -150,13 +160,95 @@ class LeadExtractionWorkflowTest extends TestCase
             null,
         );
 
-        $before = Storage::disk('public')->get($document->storage_path);
-        $prepared = app(DocumentPreprocessService::class)->prepare($document);
-        $after = Storage::disk('public')->get($document->storage_path);
+        $mock = Mockery::mock(DocumentIntelligenceServiceInterface::class);
+        $mock->shouldReceive('isConfigured')
+            ->once()
+            ->andReturn(true);
+        $mock->shouldReceive('extractDocument')
+            ->once()
+            ->andReturn([
+                'summary' => 'Local document processing failed: shared storage file could not be opened.',
+                'confidence' => 'low',
+                'needs_review' => true,
+                'review_reasons' => ['shared_storage_unavailable'],
+                'classification' => [
+                    'document_type' => 'other',
+                ],
+                'fields' => [],
+                'raw_text' => null,
+                'provider_meta' => [
+                    'provider' => 'python_local',
+                    'input_source' => 'shared_storage',
+                    'technical_failure' => true,
+                ],
+            ]);
 
-        $this->assertNull($prepared['optimized']);
-        $this->assertSame('unsupported_mime_type', data_get($prepared, 'metadata.skipped_reason'));
-        $this->assertSame($before, $after);
-        $this->assertSame($before, $prepared['original']['payload']);
+        $this->app->instance(DocumentIntelligenceServiceInterface::class, $mock);
+
+        $record = app(ExtractionService::class)->extract($document->fresh());
+
+        $this->assertSame(ExtractionStatus::REVIEW_REQUIRED, $record->extraction_status);
+        $this->assertContains('shared_storage_unavailable', data_get($document->fresh()->metadata, 'classification.review_reasons', []));
+    }
+
+    public function test_laravel_marks_contradictory_ic_result_for_review_without_reclassifying(): void
+    {
+        Storage::fake('public');
+
+        $lead = Lead::query()->create([
+            'name' => 'Guard Lead',
+            'phone_number' => '+60128880000',
+            'stage' => LeadStage::DOC_REQUESTED,
+        ]);
+
+        $lead->profile()->create();
+
+        $document = app(DocumentService::class)->storeAndRegister(
+            $lead,
+            UploadedFile::fake()->create('payslip.pdf', 512, 'application/pdf'),
+            'other',
+            null,
+        );
+
+        $mock = Mockery::mock(DocumentIntelligenceServiceInterface::class);
+        $mock->shouldReceive('isConfigured')
+            ->once()
+            ->andReturn(true);
+        $mock->shouldReceive('extractDocument')
+            ->once()
+            ->andReturn([
+                'summary' => 'Detected Malaysian IC document with front classification at medium confidence.',
+                'confidence' => 'medium',
+                'needs_review' => false,
+                'review_reasons' => [],
+                'classification' => [
+                    'document_type' => 'ic',
+                    'ic_side' => 'front',
+                    'statement_year' => 2026,
+                    'statement_month' => 4,
+                    'statement_period' => '2026-04',
+                ],
+                'fields' => [
+                    'full_name' => 'Jane Doe',
+                    'ic_number' => '900101101234',
+                    'employer' => 'Example Employer',
+                    'net_pay' => 2800.00,
+                ],
+                'raw_text' => 'KAD PENGENALAN salary gaji net pay 2800 april 2026',
+            ]);
+
+        $this->app->instance(DocumentIntelligenceServiceInterface::class, $mock);
+
+        $record = app(ExtractionService::class)->extract($document->fresh());
+
+        $this->assertSame(ExtractionStatus::REVIEW_REQUIRED, $record->extraction_status);
+
+        $metadata = $document->fresh()->metadata;
+
+        $this->assertSame('ic', data_get($metadata, 'classification.document_type'));
+        $this->assertTrue((bool) data_get($metadata, 'classification.needs_review'));
+        $this->assertContains('contradictory_ic_statement_period', data_get($metadata, 'classification.review_reasons', []));
+        $this->assertContains('contradictory_ic_payroll_evidence', data_get($metadata, 'classification.review_reasons', []));
+        $this->assertNull($lead->fresh()->ic_number);
     }
 }

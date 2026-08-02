@@ -229,7 +229,10 @@ class LeadCompletenessService
 
             $currentDate = \Carbon\Carbon::createFromFormat('Y-m', $period)->startOfMonth();
 
-            if ($previousDate && $previousDate->diffInMonths($currentDate, false) === 1) {
+            $isNextMonth = $previousDate !== null
+                && $previousDate->copy()->addMonth()->equalTo($currentDate);
+
+            if ($isNextMonth) {
                 $current[] = $document;
             } else {
                 $current = [$document];

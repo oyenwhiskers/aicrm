@@ -1537,7 +1537,15 @@ if (appRoot) {
         `;
 
         bindEvents();
+        syncGlobalScrollLock();
         restoreModalScrollPosition();
+    }
+
+    function syncGlobalScrollLock() {
+        const shouldLock = Boolean(state.selectedLeadId || state.confirmDialog);
+
+        document.documentElement.classList.toggle('crm-scroll-locked', shouldLock);
+        document.body.classList.toggle('crm-scroll-locked', shouldLock);
     }
 
     function pageMeta() {
@@ -2822,15 +2830,17 @@ if (appRoot) {
 
                 <section id="crm-uploaded-files" class="crm-card crm-card--solid crm-document-stage-last">
                     <div class="crm-card-head"><div><h3 class="crm-card-title">Uploaded files</h3><p class="crm-card-note">Review AI detection and correct checklist assignment when needed.</p></div></div>
-                    <div class="crm-card-body crm-table">
+                    <div class="crm-card-body crm-uploaded-files-body">
                         ${orderedDocuments.length ? `
                             ${renderUploadedDocumentBulkToolbar(orderedDocuments)}
-                            <table class="crm-uploaded-documents-table">
-                                <thead><tr><th><input type="checkbox" data-select-all-documents ${uploadedDocumentsSelectableCount(orderedDocuments) && state.selectedDocumentIds.length === uploadedDocumentsSelectableCount(orderedDocuments) ? 'checked' : ''} ${uploadedDocumentsSelectableCount(orderedDocuments) ? '' : 'disabled'}></th><th>File</th><th>AI Status</th><th>Checklist Assignment</th><th>Detail</th><th>Uploaded</th><th>Action</th></tr></thead>
-                                <tbody>
-                                    ${renderUploadedDocumentRows(orderedDocuments, extractedByDocumentId)}
-                                </tbody>
-                            </table>
+                            <div class="crm-uploaded-files-table-wrap">
+                                <table class="crm-uploaded-documents-table">
+                                    <thead><tr><th><input type="checkbox" data-select-all-documents ${uploadedDocumentsSelectableCount(orderedDocuments) && state.selectedDocumentIds.length === uploadedDocumentsSelectableCount(orderedDocuments) ? 'checked' : ''} ${uploadedDocumentsSelectableCount(orderedDocuments) ? '' : 'disabled'}></th><th>File</th><th>AI Status</th><th>Checklist Assignment</th><th>Detail</th><th>Uploaded</th><th>Action</th></tr></thead>
+                                    <tbody>
+                                        ${renderUploadedDocumentRows(orderedDocuments, extractedByDocumentId)}
+                                    </tbody>
+                                </table>
+                            </div>
                         ` : '<div class="crm-empty"><strong>No documents uploaded yet.</strong><span>Uploaded files will appear here after processing.</span></div>'}
                     </div>
                 </section>
@@ -3016,6 +3026,7 @@ if (appRoot) {
                                 ? 'Needs review'
                                 : `Detected ${String(classification.confidence || 'medium').toUpperCase()}`;
         const detail = classification.ic_side ? `IC ${classification.ic_side}` : classification.statement_period || classification.statement_year || extraction?.summary || 'No extraction summary';
+        const aiStatusBadge = renderDocumentAuditBadge(document, extraction, aiStatusTone, aiStatusLabel);
 
         return `
             <tr class="crm-checklist-item-row">
@@ -3025,7 +3036,7 @@ if (appRoot) {
                         <div class="crm-table-primary">${escapeHtml(document.original_filename || 'Uploaded document')}</div>
                     </div>
                 </td>
-                <td><span class="crm-badge crm-badge--status" data-tone="${aiStatusTone}">${escapeHtml(aiStatusLabel)}</span></td>
+                <td>${aiStatusBadge}</td>
                 <td>
                     <select class="crm-select crm-select--compact" data-document-assignment="${document.id}" ${isActive ? 'disabled' : ''}>
                         ${renderChecklistAssignmentOptions(assignmentKey)}
@@ -3036,6 +3047,118 @@ if (appRoot) {
                 <td>${uploadStatus === 'deleting' ? '<span class="crm-meta-text">Removing...</span>' : `<div class="crm-inline">${renderIconButton('preview', 'Preview document', `data-preview-document="${document.id}"`)}${renderIconButton('delete', 'Remove document', `data-delete-document="${document.id}" ${deleteBlocked ? 'disabled' : ''}`, 'crm-button--danger-ghost')}</div>`}</td>
             </tr>
         `;
+    }
+
+    function renderDocumentAuditBadge(document, extraction, tone, label) {
+        const badge = `<span class="crm-badge crm-badge--status" data-tone="${tone}">${escapeHtml(label)}</span>`;
+        const audit = documentAuditSnapshot(document, extraction);
+
+        if (!audit) {
+            return badge;
+        }
+
+        return `
+            <span class="crm-audit-popover" tabindex="0">
+                ${badge}
+                <span class="crm-audit-popover-card" role="tooltip" aria-label="AI detection audit details">
+                    <strong class="crm-audit-popover-title">Detection Audit</strong>
+                    <span class="crm-audit-popover-grid">
+                        ${renderAuditMetric('Document Confidence', audit.documentConfidence)}
+                        ${renderAuditMetric('Type Confidence', audit.classificationConfidence)}
+                        ${renderAuditMetric('Side Confidence', audit.sideConfidence)}
+                        ${renderAuditMetric('OCR Quality', audit.ocrQuality)}
+                        ${renderAuditMetric('Field Completeness', audit.fieldCompleteness)}
+                        ${renderAuditMetric('Score Margin', audit.scoreMargin)}
+                    </span>
+                    ${renderAuditMetricGroup('Strong Markers', audit.strongMarkers)}
+                    ${renderAuditMetricGroup('Front Markers', audit.frontMarkers)}
+                    ${renderAuditMetricGroup('Back Markers', audit.backMarkers)}
+                    ${renderAuditMetricGroup('Contradictions', audit.contradictions)}
+                    ${renderAuditMetricGroup('Review Reasons', audit.reviewReasons)}
+                </span>
+            </span>
+        `;
+    }
+
+    function documentAuditSnapshot(document, extraction) {
+        const classification = document?.classification || {};
+        const structuredFields = extraction?.structured_fields || {};
+        const providerMeta = structuredFields?.provider_meta || {};
+        const evidence = providerMeta?.decision_evidence || {};
+        const reviewReasons = Array.isArray(classification.review_reasons) && classification.review_reasons.length
+            ? classification.review_reasons
+            : Array.isArray(structuredFields.review_reasons)
+                ? structuredFields.review_reasons
+                : [];
+
+        const hasAuditData = hasAuditValue(providerMeta.classification_confidence)
+            || hasAuditValue(providerMeta.side_confidence)
+            || hasAuditValue(providerMeta.ocr_quality)
+            || hasAuditValue(providerMeta.field_completeness)
+            || Array.isArray(evidence.strong_ic_markers)
+            || Array.isArray(evidence.front_markers)
+            || Array.isArray(evidence.back_markers)
+            || Array.isArray(evidence.contradictory_evidence);
+
+        if (!hasAuditData) {
+            return null;
+        }
+
+        return {
+            documentConfidence: classification.confidence || structuredFields.confidence || 'medium',
+            classificationConfidence: providerMeta.classification_confidence || structuredFields.confidence || 'medium',
+            sideConfidence: providerMeta.side_confidence || 'N/A',
+            ocrQuality: providerMeta.ocr_quality || 'N/A',
+            fieldCompleteness: providerMeta.field_completeness || 'N/A',
+            scoreMargin: evidence.score_margin ?? 'N/A',
+            strongMarkers: evidence.strong_ic_markers || [],
+            frontMarkers: evidence.front_markers || [],
+            backMarkers: evidence.back_markers || [],
+            contradictions: evidence.contradictory_evidence || [],
+            reviewReasons,
+        };
+    }
+
+    function renderAuditMetric(label, value) {
+        return `
+            <span class="crm-audit-metric">
+                <span class="crm-audit-metric-label">${escapeHtml(label)}</span>
+                <span class="crm-audit-metric-value">${escapeHtml(formatAuditValue(value))}</span>
+            </span>
+        `;
+    }
+
+    function renderAuditMetricGroup(label, values) {
+        const normalized = Array.isArray(values)
+            ? values.filter((value) => value !== null && value !== undefined && String(value).trim() !== '')
+            : [];
+
+        if (!normalized.length) {
+            return '';
+        }
+
+        return `
+            <span class="crm-audit-group">
+                <span class="crm-audit-group-label">${escapeHtml(label)}</span>
+                <span class="crm-audit-group-value">${escapeHtml(normalized.map((value) => formatAuditValue(value)).join(', '))}</span>
+            </span>
+        `;
+    }
+
+    function formatAuditValue(value) {
+        if (value === null || value === undefined || value === '') {
+            return 'N/A';
+        }
+
+        if (typeof value === 'string') {
+            return value.replaceAll('_', ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+        }
+
+        return String(value);
+    }
+
+    function hasAuditValue(value) {
+        return value !== null && value !== undefined && String(value).trim() !== '';
     }
 
     function groupUploadedDocuments(documents) {
