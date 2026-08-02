@@ -1905,6 +1905,7 @@ textarea {
     display: grid;
     gap: 10px;
     min-width: 0;
+    flex: 1 1 auto;
 }
 
 .crm-modal-title {
@@ -1914,10 +1915,15 @@ textarea {
     line-height: 1.02;
 }
 
+.crm-modal-stage-badge {
+    flex-shrink: 0;
+}
+
 .crm-modal-meta-row {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
+    justify-content: flex-end;
 }
 
 .crm-modal-meta-pill {
@@ -1944,6 +1950,15 @@ textarea {
     justify-items: end;
     gap: 10px;
     min-width: auto;
+    flex: 0 0 auto;
+}
+
+.crm-modal-header-side {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: flex-end;
 }
 
 .crm-modal-header-topbar {
@@ -2250,23 +2265,33 @@ body.crm-scroll-locked {
 .crm-checklist-table th:nth-child(4),
 .crm-checklist-table td:nth-child(4) {
     width: 110px;
+    text-align: center;
+}
+
+.crm-checklist-action-cell {
+    display: flex;
+    justify-content: center;
 }
 
 .crm-card-head--checklist {
     align-items: start;
+    justify-content: space-between;
+    gap: 18px;
 }
 
 .crm-checklist-head-copy {
     display: grid;
     gap: 6px;
     min-width: 0;
+    flex: 1 1 auto;
 }
 
 .crm-checklist-summary {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
-    margin-top: 4px;
+    justify-content: flex-end;
+    flex: 0 0 auto;
 }
 
 .crm-checklist-metric {
@@ -2731,8 +2756,13 @@ body.crm-scroll-locked {
     }
 
     .crm-modal-header-topbar,
-    .crm-modal-header-panel {
+    .crm-modal-header-panel,
+    .crm-modal-header-side {
         justify-items: start;
+    }
+
+    .crm-modal-meta-row {
+        justify-content: flex-start;
     }
 
     .crm-modal-header-topbar {

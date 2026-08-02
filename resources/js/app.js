@@ -190,7 +190,7 @@ if (appRoot) {
             return;
         }
 
-        render();
+        refreshLeadModalView();
         syncLeadStatusPolling();
     }
 
@@ -212,6 +212,10 @@ if (appRoot) {
         }
 
         if (pendingLeadListRefresh) {
+            if (state.selectedLeadId) {
+                return;
+            }
+
             pendingLeadListRefresh = false;
             void loadLeads();
         }
@@ -233,6 +237,60 @@ if (appRoot) {
         window.requestAnimationFrame(() => {
             modalBody.scrollTop = modalBodyScrollTop;
         });
+    }
+
+    function refreshLeadModalView({ preserveScroll = true } = {}) {
+        if (!state.selectedLeadId || !state.selectedLead) {
+            render();
+            return;
+        }
+
+        const modalBody = document.querySelector('.crm-modal-body');
+        const overlayMount = document.querySelector('#crm-lead-modal-overlay');
+        const headerMain = document.querySelector('#crm-lead-modal-header-main');
+        const headerSide = document.querySelector('#crm-lead-modal-header-side');
+        const workflowNav = document.querySelector('#crm-lead-workflow-nav');
+        const stagePanel = document.querySelector('#crm-lead-stage-panel');
+
+        if (!modalBody || !overlayMount || !headerMain || !headerSide || !workflowNav || !stagePanel) {
+            render();
+            return;
+        }
+
+        const scrollTop = preserveScroll ? modalBody.scrollTop : 0;
+        const lead = state.selectedLead;
+        const latestCalculation = lead.calculation_results?.[lead.calculation_results.length - 1] || null;
+        const activeStage = resolveWorkflowStage(lead, state.activeLeadWorkflowStage);
+
+        overlayMount.innerHTML = renderModalBusyOverlay();
+        headerMain.innerHTML = renderLeadModalHeaderMain(lead);
+        headerSide.innerHTML = renderLeadModalHeaderSide(lead);
+        workflowNav.innerHTML = renderLeadWorkflowTabs(lead, activeStage);
+        stagePanel.innerHTML = renderWorkflowStagePanel(lead, activeStage, latestCalculation);
+
+        bindLeadModalEvents();
+
+        if (!preserveScroll) {
+            return;
+        }
+
+        window.requestAnimationFrame(() => {
+            modalBody.scrollTop = scrollTop;
+        });
+    }
+
+    function bindOnce(element, key, eventName, handler) {
+        if (!element) {
+            return;
+        }
+
+        const flag = `bound${key}`;
+        if (element.dataset[flag] === '1') {
+            return;
+        }
+
+        element.dataset[flag] = '1';
+        element.addEventListener(eventName, handler);
     }
 
     async function apiRequest(path, options = {}) {
@@ -1101,6 +1159,8 @@ if (appRoot) {
     }
 
     function closeLeadModal() {
+        const shouldRefreshLeadList = pendingLeadListRefresh;
+
         state.selectedLeadId = null;
         state.selectedLead = null;
         state.activeLeadWorkflowStage = 'documents';
@@ -1113,6 +1173,10 @@ if (appRoot) {
         stopLeadStatusPolling();
         history.replaceState({}, '', '/workspace');
         render();
+
+        if (shouldRefreshLeadList) {
+            void loadLeads();
+        }
     }
 
     function setLeadWorkflowStage(stage) {
@@ -1126,7 +1190,7 @@ if (appRoot) {
         }
 
         state.activeLeadWorkflowStage = stage;
-        render();
+        refreshLeadModalView({ preserveScroll: false });
     }
 
     async function uploadLeadDocuments(files) {
@@ -1147,7 +1211,7 @@ if (appRoot) {
         state.uploadingDocuments = true;
         state.modalBusyMessage = buildDocumentUploadBusyMessage(0, uploadFiles.length, 0, uploadChunks.length);
         state.documentStageDragActive = false;
-        render();
+        refreshLeadModalView();
 
         try {
             for (let index = 0; index < uploadChunks.length; index += 1) {
@@ -1156,7 +1220,7 @@ if (appRoot) {
                 chunk.forEach((file) => data.append('files[]', file));
 
                 state.modalBusyMessage = buildDocumentUploadBusyMessage(uploadedCount, uploadFiles.length, index + 1, uploadChunks.length);
-                render();
+                refreshLeadModalView();
 
                 const payload = await apiRequest(`/leads/${state.selectedLeadId}/documents/batch`, {
                     method: 'POST',
@@ -1166,6 +1230,7 @@ if (appRoot) {
                 uploadedCount += Number(payload?.data?.uploaded_count || chunk.length);
                 lastPayload = payload;
                 applyLeadStatusPayload(payload.data);
+                refreshLeadModalView();
             }
 
             pendingLeadListRefresh = true;
@@ -1177,7 +1242,7 @@ if (appRoot) {
             state.loading = false;
             state.uploadingDocuments = false;
             state.modalBusyMessage = '';
-            render();
+            refreshLeadModalView();
         }
     }
 
@@ -1228,7 +1293,7 @@ if (appRoot) {
 
         state.loading = true;
         state.modalBusyMessage = 'Updating document assignment...';
-        render();
+        refreshLeadModalView();
 
         try {
             await apiRequest(`/leads/${state.selectedLeadId}/documents/${documentId}/assignment`, {
@@ -1244,7 +1309,7 @@ if (appRoot) {
         } finally {
             state.loading = false;
             state.modalBusyMessage = '';
-            render();
+            refreshLeadModalView();
         }
     }
 
@@ -1268,7 +1333,7 @@ if (appRoot) {
 
         state.loading = true;
         state.modalBusyMessage = 'Deleting document...';
-        render();
+        refreshLeadModalView();
 
         try {
             await apiRequest(`/leads/${state.selectedLeadId}/documents/${documentId}`, {
@@ -1283,7 +1348,7 @@ if (appRoot) {
         } finally {
             state.loading = false;
             state.modalBusyMessage = '';
-            render();
+            refreshLeadModalView();
         }
     }
 
@@ -1316,7 +1381,7 @@ if (appRoot) {
 
         state.loading = true;
         state.modalBusyMessage = `Deleting ${selectedIds.length} document${selectedIds.length === 1 ? '' : 's'}...`;
-        render();
+        refreshLeadModalView();
 
         try {
             await Promise.all(
@@ -1334,7 +1399,7 @@ if (appRoot) {
         } finally {
             state.loading = false;
             state.modalBusyMessage = '';
-            render();
+            refreshLeadModalView();
         }
     }
 
@@ -1362,7 +1427,7 @@ if (appRoot) {
         }
 
         state.selectedDocumentIds = Array.from(next);
-        render();
+        refreshLeadModalView();
     }
 
     function toggleAllDocumentSelections(checked) {
@@ -1371,7 +1436,7 @@ if (appRoot) {
             .map((document) => Number(document.id));
 
         state.selectedDocumentIds = checked ? selectableIds : [];
-        render();
+        refreshLeadModalView();
     }
 
     async function runCalculation(form) {
@@ -2711,40 +2776,60 @@ if (appRoot) {
 
         return `
             <section class="crm-card crm-card--solid crm-modal-card">
-                ${renderModalBusyOverlay()}
+                <div id="crm-lead-modal-overlay">${renderModalBusyOverlay()}</div>
                 <div class="crm-card-head crm-modal-header">
-                    <div class="crm-modal-header-main">
-                        <p class="crm-eyebrow">Lead Details</p>
-                        <h2 class="crm-modal-title">${escapeHtml(lead.name)}</h2>
-                        <div class="crm-modal-meta-row">
-                            <span class="crm-badge" data-tone="${stageTone(lead.stage)}">${escapeHtml(lead.stage.replaceAll('_', ' '))}</span>
-                            <span class="crm-modal-meta-pill">${escapeHtml(lead.phone_number || 'Phone unavailable')}</span>
-                            ${lead.ic_number ? `<span class="crm-modal-meta-pill crm-modal-meta-pill--muted">IC ${escapeHtml(lead.ic_number)}</span>` : ''}
-                        </div>
+                    <div class="crm-modal-header-main" id="crm-lead-modal-header-main">
+                        ${renderLeadModalHeaderMain(lead)}
                     </div>
                     <div class="crm-modal-header-panel">
                         <div class="crm-modal-header-topbar">
                             <button type="button" class="crm-button crm-button--ghost crm-button--small crm-modal-close" data-action="close-modal" aria-label="Close" title="Close">&times;</button>
                         </div>
+                        <div class="crm-modal-header-side" id="crm-lead-modal-header-side">
+                            ${renderLeadModalHeaderSide(lead)}
+                        </div>
                     </div>
                 </div>
                 <div class="crm-card-body crm-stack crm-modal-body">
-                    <section class="crm-workflow-nav">
-                        ${workflowStages.map((stage, index) => `
-                            <button type="button" class="crm-workflow-tab ${activeStage === stage.key ? 'is-active' : ''} ${stage.locked ? 'is-locked' : ''}" data-workflow-stage="${stage.key}" ${stage.locked ? 'disabled' : ''}>
-                                <span class="crm-workflow-step">${index + 1}</span>
-                                <span>
-                                    <strong>${escapeHtml(stage.label)}</strong>
-                                    <small>${escapeHtml(stage.description)}</small>
-                                </span>
-                            </button>
-                        `).join('')}
+                    <section class="crm-workflow-nav" id="crm-lead-workflow-nav">
+                        ${renderLeadWorkflowTabs(lead, activeStage)}
                     </section>
 
-                    ${renderWorkflowStagePanel(lead, activeStage, latestCalculation)}
+                    <div id="crm-lead-stage-panel">
+                        ${renderWorkflowStagePanel(lead, activeStage, latestCalculation)}
+                    </div>
                 </div>
             </section>
         `;
+    }
+
+    function renderLeadModalHeaderMain(lead) {
+        return `
+            <p class="crm-eyebrow">Lead Details</p>
+            <h2 class="crm-modal-title">${escapeHtml(lead.name)}</h2>
+        `;
+    }
+
+    function renderLeadModalHeaderSide(lead) {
+        return `
+            <div class="crm-modal-meta-row">
+                <span class="crm-modal-meta-pill">${escapeHtml(lead.phone_number || 'Phone unavailable')}</span>
+                ${lead.ic_number ? `<span class="crm-modal-meta-pill crm-modal-meta-pill--muted">IC ${escapeHtml(lead.ic_number)}</span>` : ''}
+            </div>
+            <span class="crm-badge crm-modal-stage-badge" data-tone="${stageTone(lead.stage)}">${escapeHtml(lead.stage.replaceAll('_', ' '))}</span>
+        `;
+    }
+
+    function renderLeadWorkflowTabs(lead, activeStage) {
+        return availableWorkflowStages(lead).map((stage, index) => `
+            <button type="button" class="crm-workflow-tab ${activeStage === stage.key ? 'is-active' : ''} ${stage.locked ? 'is-locked' : ''}" data-workflow-stage="${stage.key}" ${stage.locked ? 'disabled' : ''}>
+                <span class="crm-workflow-step">${index + 1}</span>
+                <span>
+                    <strong>${escapeHtml(stage.label)}</strong>
+                    <small>${escapeHtml(stage.description)}</small>
+                </span>
+            </button>
+        `).join('');
     }
 
     function renderWorkflowStagePanel(lead, activeStage, latestCalculation) {
@@ -2815,7 +2900,6 @@ if (appRoot) {
                                             <div class="crm-checklist-group-head">
                                                 <div class="crm-checklist-group-copy">
                                                     <strong>${escapeHtml(item.label)}</strong>
-                                                    ${item.is_complete ? '' : `<span class="crm-meta-text">${escapeHtml(renderChecklistGroupNote(item))}</span>`}
                                                 </div>
                                                 <span class="crm-checklist-group-progress">${renderChecklistGroupProgress(item)}</span>
                                             </div>
@@ -2867,11 +2951,11 @@ if (appRoot) {
                 <div class="crm-checklist-head-copy">
                     <h3 class="crm-card-title">Checklist</h3>
                     <p class="crm-card-note">Track required documents and completion status for this lead.</p>
-                    <div class="crm-checklist-summary">
-                        <span class="crm-checklist-metric" data-tone="matched"><strong>${summary.complete}</strong><span>/ ${summary.total} documents complete</span></span>
-                        <span class="crm-checklist-metric" data-tone="missing"><strong>${summary.missing}</strong><span>Missing</span></span>
-                        <span class="crm-checklist-metric" data-tone="review"><strong>${summary.review}</strong><span>Need review</span></span>
-                    </div>
+                </div>
+                <div class="crm-checklist-summary">
+                    <span class="crm-checklist-metric" data-tone="matched"><strong>${summary.complete}</strong><span>/ ${summary.total} documents complete</span></span>
+                    <span class="crm-checklist-metric" data-tone="missing"><strong>${summary.missing}</strong><span>Missing</span></span>
+                    <span class="crm-checklist-metric" data-tone="review"><strong>${summary.review}</strong><span>Need review</span></span>
                 </div>
             </div>
         `;
@@ -2918,18 +3002,18 @@ if (appRoot) {
 
     function renderChecklistRowAction(slot) {
         if (slot.is_complete && slot.document) {
-            return renderIconButton('preview', 'Preview document', `data-preview-document="${slot.document.id}"`);
+            return `<div class="crm-checklist-action-cell">${renderIconButton('preview', 'Preview document', `data-preview-document="${slot.document.id}"`)}</div>`;
         }
 
         if (slot.needs_review && slot.document) {
-            return `<button type="button" class="crm-button crm-button--ghost crm-button--small" data-action="scroll-to-uploaded-files">Review</button>`;
+            return '<div class="crm-checklist-action-cell"><button type="button" class="crm-button crm-button--ghost crm-button--small" data-action="scroll-to-uploaded-files">Review</button></div>';
         }
 
         if (slot.is_missing) {
-            return `<button type="button" class="crm-button crm-button--ghost crm-button--small" data-action="pick-documents" ${state.uploadingDocuments ? 'disabled' : ''}>Upload</button>`;
+            return `<div class="crm-checklist-action-cell"><button type="button" class="crm-button crm-button--ghost crm-button--small" data-action="pick-documents" ${state.uploadingDocuments ? 'disabled' : ''}>Upload</button></div>`;
         }
 
-        return '<span class="crm-meta-text">-</span>';
+        return '<div class="crm-checklist-action-cell"><span class="crm-meta-text">-</span></div>';
     }
 
     function renderChecklistTableRow(slot) {
@@ -3507,17 +3591,6 @@ if (appRoot) {
             });
         });
 
-        document.querySelectorAll('[data-action="close-modal"]').forEach((element) => {
-            element.addEventListener('click', (event) => {
-                event.preventDefault();
-                closeLeadModal();
-            });
-        });
-
-        document.querySelector('.crm-modal-shell')?.addEventListener('click', (event) => {
-            event.stopPropagation();
-        });
-
         document.querySelector('.crm-confirm-card')?.addEventListener('click', (event) => {
             event.stopPropagation();
         });
@@ -3534,22 +3607,37 @@ if (appRoot) {
             await acceptConfirmDialog();
         });
 
+        bindLeadModalEvents();
+    }
+
+    function bindLeadModalEvents() {
+        document.querySelectorAll('[data-action="close-modal"]').forEach((element) => {
+            bindOnce(element, 'CloseModal', 'click', (event) => {
+                event.preventDefault();
+                closeLeadModal();
+            });
+        });
+
+        bindOnce(document.querySelector('.crm-modal-shell'), 'StopModalShell', 'click', (event) => {
+            event.stopPropagation();
+        });
+
         document.querySelectorAll('[data-action="pick-documents"]').forEach((button) => {
-            button.addEventListener('click', () => document.querySelector('#lead-document-input')?.click());
+            bindOnce(button, 'PickDocuments', 'click', () => document.querySelector('#lead-document-input')?.click());
         });
 
         document.querySelectorAll('[data-action="scroll-to-uploaded-files"]').forEach((button) => {
-            button.addEventListener('click', () => {
+            bindOnce(button, 'ScrollUploadedFiles', 'click', () => {
                 document.querySelector('#crm-uploaded-files')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
             });
         });
 
-        document.querySelector('#lead-document-input')?.addEventListener('change', async (event) => {
+        bindOnce(document.querySelector('#lead-document-input'), 'LeadDocumentInput', 'change', async (event) => {
             await uploadLeadDocuments(event.currentTarget.files || []);
             event.currentTarget.value = '';
         });
 
-        document.querySelector('[data-document-stage-dropzone]')?.addEventListener('dragenter', (event) => {
+        bindOnce(document.querySelector('[data-document-stage-dropzone]'), 'DocumentStageDragEnter', 'dragenter', (event) => {
             if (!transferHasFiles(event.dataTransfer)) {
                 return;
             }
@@ -3559,20 +3647,20 @@ if (appRoot) {
 
             if (!state.documentStageDragActive) {
                 state.documentStageDragActive = true;
-                render();
+                refreshLeadModalView();
             }
         });
 
-        document.querySelector('[data-document-stage-dropzone]')?.addEventListener('dragover', (event) => {
+        bindOnce(document.querySelector('[data-document-stage-dropzone]'), 'DocumentStageDragOver', 'dragover', (event) => {
             event.preventDefault();
 
             if (!state.documentStageDragActive) {
                 state.documentStageDragActive = true;
-                render();
+                refreshLeadModalView();
             }
         });
 
-        document.querySelector('[data-document-stage-dropzone]')?.addEventListener('dragleave', (event) => {
+        bindOnce(document.querySelector('[data-document-stage-dropzone]'), 'DocumentStageDragLeave', 'dragleave', (event) => {
             if (!transferHasFiles(event.dataTransfer)) {
                 return;
             }
@@ -3582,11 +3670,11 @@ if (appRoot) {
 
             if (documentStageDragDepth === 0 && state.documentStageDragActive) {
                 state.documentStageDragActive = false;
-                render();
+                refreshLeadModalView();
             }
         });
 
-        document.querySelector('[data-document-stage-dropzone]')?.addEventListener('drop', async (event) => {
+        bindOnce(document.querySelector('[data-document-stage-dropzone]'), 'DocumentStageDrop', 'drop', async (event) => {
             event.preventDefault();
             documentStageDragDepth = 0;
             state.documentStageDragActive = false;
@@ -3594,55 +3682,55 @@ if (appRoot) {
         });
 
         document.querySelectorAll('[data-document-assignment]').forEach((select) => {
-            select.addEventListener('change', async (event) => {
+            bindOnce(select, 'DocumentAssignment', 'change', async (event) => {
                 await updateDocumentAssignment(select.dataset.documentAssignment, event.currentTarget.value);
             });
         });
 
-        document.querySelector('[data-select-all-documents]')?.addEventListener('change', (event) => {
+        bindOnce(document.querySelector('[data-select-all-documents]'), 'SelectAllDocuments', 'change', (event) => {
             toggleAllDocumentSelections(event.currentTarget.checked);
         });
 
-        document.querySelector('[data-select-all-toggle]')?.addEventListener('click', () => {
+        bindOnce(document.querySelector('[data-select-all-toggle]'), 'SelectAllToggle', 'click', () => {
             const selectableCount = uploadedDocumentsSelectableCount(state.selectedLead?.documents || []);
             const shouldSelectAll = !(selectableCount && state.selectedDocumentIds.length === selectableCount);
             toggleAllDocumentSelections(shouldSelectAll);
         });
 
         document.querySelectorAll('[data-document-select]').forEach((input) => {
-            input.addEventListener('change', (event) => {
+            bindOnce(input, 'DocumentSelect', 'change', (event) => {
                 toggleDocumentSelection(input.dataset.documentSelect, event.currentTarget.checked);
             });
         });
 
-        document.querySelector('[data-bulk-delete-documents]')?.addEventListener('click', async () => {
+        bindOnce(document.querySelector('[data-bulk-delete-documents]'), 'BulkDeleteDocuments', 'click', async () => {
             await bulkDeleteLeadDocuments();
         });
 
         document.querySelectorAll('[data-preview-document]').forEach((button) => {
-            button.addEventListener('click', () => {
+            bindOnce(button, 'PreviewDocument', 'click', () => {
                 previewLeadDocument(button.dataset.previewDocument);
             });
         });
 
         document.querySelectorAll('[data-delete-document]').forEach((button) => {
-            button.addEventListener('click', async () => {
+            bindOnce(button, 'DeleteDocument', 'click', async () => {
                 await deleteLeadDocument(button.dataset.deleteDocument);
             });
         });
 
         document.querySelectorAll('[data-workflow-stage]').forEach((button) => {
-            button.addEventListener('click', () => {
+            bindOnce(button, 'WorkflowStage', 'click', () => {
                 setLeadWorkflowStage(button.dataset.workflowStage);
             });
         });
 
-        document.querySelector('#calculation-form')?.addEventListener('submit', (event) => {
+        bindOnce(document.querySelector('#calculation-form'), 'CalculationForm', 'submit', (event) => {
             event.preventDefault();
             runCalculation(event.currentTarget);
         });
 
-        document.querySelector('[data-action="run-bank-match"]')?.addEventListener('click', runBankMatch);
+        bindOnce(document.querySelector('[data-action="run-bank-match"]'), 'RunBankMatch', 'click', runBankMatch);
     }
 
     function bindGlobalWorkspaceEvents() {
