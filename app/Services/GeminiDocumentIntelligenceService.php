@@ -32,6 +32,13 @@ class GeminiDocumentIntelligenceService implements DocumentIntelligenceServiceIn
         return $this->geminiExtractionService->extract(
             $documentPayload['mime_type'] ?? null,
             (string) $contentBase64,
+            [
+                'request_context' => 'document_extraction',
+                'lead_id' => $documentPayload['lead_id'] ?? null,
+                'lead_document_id' => $documentPayload['document_id'] ?? null,
+                'input_mime_type' => $documentPayload['mime_type'] ?? null,
+                'input_filename' => $documentPayload['filename'] ?? null,
+            ],
         );
     }
 }

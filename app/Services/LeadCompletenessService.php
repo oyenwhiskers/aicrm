@@ -284,7 +284,8 @@ class LeadCompletenessService
         return match (true) {
             str_starts_with($key, 'payslip_') => data_get($document->metadata, 'classification.statement_period'),
             str_starts_with($key, 'epf_year_') => (string) data_get($document->metadata, 'classification.statement_year'),
-            str_starts_with($key, 'ic_') => ucfirst((string) data_get($document->metadata, 'classification.ic_side', '')),
+            $key === 'ic_front' => 'Front',
+            $key === 'ic_back' => 'Back',
             default => null,
         };
     }

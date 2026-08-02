@@ -18,6 +18,7 @@ class LeadCaptureService
             $image->getMimeType(),
             $image->get(),
             $source,
+            $image->getClientOriginalName(),
         );
     }
 
@@ -27,16 +28,22 @@ class LeadCaptureService
             $mimeType,
             Storage::disk($disk)->get($path),
             $source,
+            basename($path),
         );
     }
 
-    protected function extractFromBinary(?string $mimeType, string $binaryPayload, ?string $source = null): array
+    protected function extractFromBinary(?string $mimeType, string $binaryPayload, ?string $source = null, ?string $filename = null): array
     {
         $payload = base64_encode($binaryPayload);
 
         $result = $this->geminiExtractionService->extractLeadCaptureImage(
             $mimeType,
             $payload,
+            [
+                'request_context' => 'lead_intake',
+                'input_mime_type' => $mimeType,
+                'input_filename' => $filename,
+            ],
         );
 
         $rows = collect($result['rows'] ?? [])

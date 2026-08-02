@@ -6,6 +6,8 @@ if (appRoot) {
     const appShortName = appRoot.dataset.appShortName || 'LPS';
     const appTitle = appName.replace(/\s*\(LPS\)\s*$/i, '').trim() || appName;
     const page = appRoot.dataset.page || 'workspace';
+    const aiMonitoringDefaultCurrency = String(appRoot.dataset.aiMonitoringDisplayCurrency || 'USD').toUpperCase();
+    const aiMonitoringUsdToMyrRate = Number(appRoot.dataset.aiMonitoringUsdToMyrRate || 1);
     let intakeGlobalsBound = false;
     let workspaceGlobalsBound = false;
     let intakeDragDepth = 0;
@@ -38,6 +40,8 @@ if (appRoot) {
         selectedLeadId: initialLeadId(),
         selectedLead: null,
         activeLeadWorkflowStage: 'documents',
+        leadModalView: 'overview',
+        selectedDocumentDetail: null,
         documentStageDragActive: false,
         uploadingDocuments: false,
         modalBusyMessage: '',
@@ -46,9 +50,20 @@ if (appRoot) {
         leadSort: { field: '', direction: 'asc' },
         pagination: { total: 0, current_page: 1, last_page: 1 },
         loadingDashboard: false,
+        loadingAiMonitoring: false,
         dashboardLeads: [],
         dashboardTodayTotal: 0,
         dashboardTotal: 0,
+        aiMonitoring: {
+            filters: initialAiMonitoringFilters(),
+            currency: ['USD', 'MYR'].includes(aiMonitoringDefaultCurrency) ? aiMonitoringDefaultCurrency : 'USD',
+            view: 'summary',
+            filtersOpen: false,
+            overview: null,
+            breakdowns: null,
+            requests: [],
+            pagination: { total: 0, current_page: 1, last_page: 1, per_page: 25 },
+        },
         confirmDialog: null,
         extractedRows: [],
         extractedSummary: null,
@@ -89,6 +104,10 @@ if (appRoot) {
             await loadDashboardData();
         }
 
+        if (state.page === 'ai-monitoring') {
+            await loadAiMonitoringData();
+        }
+
         if (state.page === 'workspace') {
             await loadLeads();
 
@@ -110,6 +129,24 @@ if (appRoot) {
         } catch (error) {
             return '';
         }
+    }
+
+    function initialAiMonitoringFilters() {
+        const today = new Date();
+        const dateTo = today.toISOString().slice(0, 10);
+        const dateFromDate = new Date(today);
+        dateFromDate.setDate(dateFromDate.getDate() - 6);
+
+        return {
+            date_from: dateFromDate.toISOString().slice(0, 10),
+            date_to: dateTo,
+            request_context: '',
+            model: '',
+            document_type: '',
+            request_status: '',
+            needs_review: '',
+            lead_id: '',
+        };
     }
 
     function activeDocumentStatuses() {
@@ -249,10 +286,9 @@ if (appRoot) {
         const overlayMount = document.querySelector('#crm-lead-modal-overlay');
         const headerMain = document.querySelector('#crm-lead-modal-header-main');
         const headerSide = document.querySelector('#crm-lead-modal-header-side');
-        const workflowNav = document.querySelector('#crm-lead-workflow-nav');
-        const stagePanel = document.querySelector('#crm-lead-stage-panel');
+        const modalContent = document.querySelector('#crm-lead-modal-content');
 
-        if (!modalBody || !overlayMount || !headerMain || !headerSide || !workflowNav || !stagePanel) {
+        if (!modalBody || !overlayMount || !headerMain || !headerSide || !modalContent) {
             render();
             return;
         }
@@ -265,8 +301,7 @@ if (appRoot) {
         overlayMount.innerHTML = renderModalBusyOverlay();
         headerMain.innerHTML = renderLeadModalHeaderMain(lead);
         headerSide.innerHTML = renderLeadModalHeaderSide(lead);
-        workflowNav.innerHTML = renderLeadWorkflowTabs(lead, activeStage);
-        stagePanel.innerHTML = renderWorkflowStagePanel(lead, activeStage, latestCalculation);
+        modalContent.innerHTML = renderLeadModalContent(lead, activeStage, latestCalculation);
 
         bindLeadModalEvents();
 
@@ -1135,6 +1170,57 @@ if (appRoot) {
         }
     }
 
+    async function loadAiMonitoringData(page = state.aiMonitoring.pagination.current_page || 1) {
+        state.loadingAiMonitoring = true;
+        render();
+
+        try {
+            const requestedPage = Math.max(1, Number(page) || 1);
+            const params = buildAiMonitoringQueryParams({
+                ...state.aiMonitoring.filters,
+                page: String(requestedPage),
+                per_page: String(state.aiMonitoring.pagination.per_page || 25),
+            });
+
+            const [overviewPayload, breakdownPayload, requestsPayload] = await Promise.all([
+                apiRequest(`/ai-monitoring/overview?${params.toString()}`),
+                apiRequest(`/ai-monitoring/breakdowns?${params.toString()}`),
+                apiRequest(`/ai-monitoring/requests?${params.toString()}`),
+            ]);
+
+            state.aiMonitoring.overview = overviewPayload.data || null;
+            state.aiMonitoring.breakdowns = breakdownPayload.data || null;
+            state.aiMonitoring.requests = requestsPayload.data || [];
+            state.aiMonitoring.pagination = {
+                total: requestsPayload.total || 0,
+                current_page: requestsPayload.current_page || requestedPage,
+                last_page: requestsPayload.last_page || 1,
+                per_page: requestsPayload.per_page || state.aiMonitoring.pagination.per_page || 25,
+            };
+        } catch (error) {
+            pushNotice(error.message, 'error');
+        } finally {
+            state.loadingAiMonitoring = false;
+            render();
+        }
+    }
+
+    function buildAiMonitoringQueryParams(extra = {}) {
+        const params = new URLSearchParams();
+        const filters = {
+            ...state.aiMonitoring.filters,
+            ...extra,
+        };
+
+        Object.entries(filters).forEach(([key, value]) => {
+            if (value !== null && value !== undefined && String(value).trim() !== '') {
+                params.set(key, String(value));
+            }
+        });
+
+        return params;
+    }
+
     async function loadLead(leadId, { preserveUrl = false } = {}) {
         stopLeadStatusPolling();
         state.loadingLeadDetail = true;
@@ -1164,6 +1250,8 @@ if (appRoot) {
         state.selectedLeadId = null;
         state.selectedLead = null;
         state.activeLeadWorkflowStage = 'documents';
+        state.leadModalView = 'overview';
+        state.selectedDocumentDetail = null;
         state.documentStageDragActive = false;
         state.uploadingDocuments = false;
         state.modalBusyMessage = '';
@@ -1177,6 +1265,89 @@ if (appRoot) {
         if (shouldRefreshLeadList) {
             void loadLeads();
         }
+    }
+
+    function leadDocumentById(documentId) {
+        const normalizedId = Number(documentId);
+
+        if (!Number.isInteger(normalizedId)) {
+            return null;
+        }
+
+        return (state.selectedLead?.documents || []).find((document) => Number(document.id) === normalizedId) || null;
+    }
+
+    function extractedDataByDocumentId(documentId) {
+        const normalizedId = Number(documentId);
+
+        if (!Number.isInteger(normalizedId)) {
+            return null;
+        }
+
+        return (state.selectedLead?.extracted_data || []).find((item) => Number(item.document_id) === normalizedId) || null;
+    }
+
+    function openLeadDocumentDetail(documentId, source = 'uploaded_files', label = '') {
+        const leadDocument = leadDocumentById(documentId);
+
+        if (!leadDocument || !state.selectedLead) {
+            return;
+        }
+
+        const modalBody = window.document.querySelector('.crm-modal-body');
+
+        state.selectedDocumentDetail = {
+            documentId: Number(leadDocument.id),
+            source,
+            label: label || defaultDocumentDetailLabel(leadDocument, source),
+            returnScrollTop: modalBody ? modalBody.scrollTop : modalBodyScrollTop,
+        };
+        state.leadModalView = 'document_detail';
+        refreshLeadModalView({ preserveScroll: false });
+    }
+
+    function closeLeadDocumentDetail() {
+        if (!state.selectedDocumentDetail) {
+            return;
+        }
+
+        const returnScrollTop = Number(state.selectedDocumentDetail.returnScrollTop || 0);
+
+        state.leadModalView = 'overview';
+        state.selectedDocumentDetail = null;
+        refreshLeadModalView({ preserveScroll: false });
+
+        window.requestAnimationFrame(() => {
+            const modalBody = window.document.querySelector('.crm-modal-body');
+            if (modalBody) {
+                modalBody.scrollTop = returnScrollTop;
+            }
+        });
+    }
+
+    function defaultDocumentDetailLabel(leadDocument, source) {
+        if (source === 'checklist') {
+            return inferChecklistSlotLabel(leadDocument);
+        }
+
+        return leadDocument.original_filename || 'Document';
+    }
+
+    function inferChecklistSlotLabel(leadDocument) {
+        const assignmentKey = filledAssignmentKey(leadDocument);
+        const labels = {
+            ic_front: 'IC Front',
+            ic_back: 'IC Back',
+            payslip_1: 'Payslip Month 1',
+            payslip_2: 'Payslip Month 2',
+            payslip_3: 'Payslip Month 3',
+            epf_year_1: 'EPF Year 1',
+            epf_year_2: 'EPF Year 2',
+            ramci: 'RAMCI',
+            ctos: 'CTOS',
+        };
+
+        return labels[assignmentKey] || leadDocument.original_filename || 'Document';
     }
 
     function setLeadWorkflowStage(stage) {
@@ -1408,7 +1579,7 @@ if (appRoot) {
             return;
         }
 
-        window.open(`${apiBase}/leads/${state.selectedLeadId}/documents/${documentId}/preview`, '_blank', 'noopener');
+        openLeadDocumentDetail(documentId);
     }
 
     function toggleDocumentSelection(documentId, checked) {
@@ -1623,6 +1794,10 @@ if (appRoot) {
                 title: 'Lead Intake',
                 description: 'Upload screenshots, review extracted rows, and import leads.',
             },
+            'ai-monitoring': {
+                title: 'AI Monitoring',
+                description: 'Review Gemini request usage, token volume, latency, and review patterns.',
+            },
             workspace: {
                 title: 'Workspace',
                 description: 'Manage leads, documents, calculations, and bank matching.',
@@ -1636,6 +1811,7 @@ if (appRoot) {
         const icons = {
             dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"></rect><rect x="14" y="3" width="7" height="5" rx="1.5"></rect><rect x="14" y="12" width="7" height="9" rx="1.5"></rect><rect x="3" y="16" width="7" height="5" rx="1.5"></rect>',
             intake: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="17 8 12 3 7 8"></polyline><line x1="12" y1="3" x2="12" y2="15"></line>',
+            'ai-monitoring': '<path d="M4 19h16"></path><path d="M7 16V8"></path><path d="M12 16V5"></path><path d="M17 16v-6"></path>',
             workspace: '<rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="9" x2="9" y2="20"></line>',
         };
 
@@ -1646,6 +1822,7 @@ if (appRoot) {
         const navItems = [
             { page: 'dashboard', href: '/dashboard', label: 'Dashboard' },
             { page: 'intake', href: '/lead-intake', label: 'Lead Intake' },
+            { page: 'ai-monitoring', href: '/ai-monitoring', label: 'AI Monitoring' },
             { page: 'workspace', href: '/workspace', label: 'Workspace' },
         ];
 
@@ -1693,6 +1870,10 @@ if (appRoot) {
 
         if (state.page === 'intake') {
             return renderIntakePage();
+        }
+
+        if (state.page === 'ai-monitoring') {
+            return renderAiMonitoringPage();
         }
 
         return renderWorkspacePage();
@@ -1791,6 +1972,471 @@ if (appRoot) {
                 <strong class="crm-metric-value">${escapeHtml(String(value ?? 0))}</strong>
                 <span class="crm-metric-note">${escapeHtml(note)}</span>
             </article>
+        `;
+    }
+
+    function renderAiMonitoringPage() {
+        const overview = state.aiMonitoring.overview?.totals || null;
+        const breakdowns = state.aiMonitoring.breakdowns;
+        const requests = state.aiMonitoring.requests || [];
+        const pagination = state.aiMonitoring.pagination || { total: 0, current_page: 1, last_page: 1 };
+        const filters = state.aiMonitoring.filters;
+        const hasData = Boolean(overview || requests.length || breakdowns);
+        const currentView = state.aiMonitoring.view || 'summary';
+
+        return `
+            <section class="crm-ai-monitoring-page crm-stack">
+                <section class="crm-card crm-card--solid crm-ai-monitoring-toolbar-card">
+                    <div class="crm-card-body">
+                        <div class="crm-ai-monitoring-topbar">
+                            <div class="crm-pill-nav crm-ai-monitoring-view-switch" role="tablist" aria-label="AI monitoring views">
+                                <button
+                                    type="button"
+                                    class="crm-pill ${currentView === 'summary' ? 'is-active' : ''}"
+                                    data-ai-monitoring-view="summary"
+                                    role="tab"
+                                    aria-selected="${currentView === 'summary' ? 'true' : 'false'}"
+                                >Summary</button>
+                                <button
+                                    type="button"
+                                    class="crm-pill ${currentView === 'requests' ? 'is-active' : ''}"
+                                    data-ai-monitoring-view="requests"
+                                    role="tab"
+                                    aria-selected="${currentView === 'requests' ? 'true' : 'false'}"
+                                >Request Explorer</button>
+                            </div>
+                            <div class="crm-ai-monitoring-topbar-actions">
+                                <button type="button" class="crm-pill crm-ai-monitoring-toolbar-button" data-action="reset-ai-monitoring-filters">Reset</button>
+                                <button type="button" class="crm-pill crm-ai-monitoring-toolbar-button crm-ai-monitoring-toolbar-button--danger" data-action="clear-ai-monitoring-logs">Clear Data</button>
+                                <div class="crm-ai-monitoring-currency-field">
+                                    <select class="crm-select crm-ai-monitoring-currency-select" name="currency" data-ai-monitoring-currency aria-label="Display currency">
+                                        ${renderAiMonitoringOptions(state.aiMonitoring.currency, [
+                                            ['USD', 'USD'],
+                                            ['MYR', 'MYR'],
+                                        ])}
+                                    </select>
+                                </div>
+                                <div class="crm-ai-monitoring-filter-shell" data-ai-monitoring-filter-shell>
+                                    ${renderIconButton(
+                                        'filter',
+                                        state.aiMonitoring.filtersOpen ? 'Close filters' : 'Open filters',
+                                        `data-action="toggle-ai-monitoring-filters" aria-expanded="${state.aiMonitoring.filtersOpen ? 'true' : 'false'}" aria-haspopup="dialog"`,
+                                        state.aiMonitoring.filtersOpen ? 'is-active' : '',
+                                    )}
+                                    ${state.aiMonitoring.filtersOpen ? renderAiMonitoringFilterPopover(filters) : ''}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                ${state.loadingAiMonitoring && !hasData
+                    ? '<div class="crm-empty crm-empty--compact"><strong>Loading AI monitoring...</strong><span>Fetching Gemini request metrics.</span></div>'
+                    : `
+                        ${currentView === 'summary'
+                            ? renderAiMonitoringSummaryView(overview, breakdowns)
+                            : renderAiMonitoringRequestView(requests, pagination)}
+                    `}
+            </section>
+        `;
+    }
+
+    function renderAiMonitoringFilterPopover(filters) {
+        return `
+            <div class="crm-ai-monitoring-filter-popover crm-card crm-card--solid" role="dialog" aria-label="AI monitoring filters">
+                <div class="crm-card-head">
+                    <div>
+                        <h3 class="crm-card-title">Filters</h3>
+                        <p class="crm-card-note">Adjust the request window and breakdown scope.</p>
+                    </div>
+                </div>
+                <div class="crm-card-body">
+                    <form class="crm-ai-monitoring-filters crm-filter-grid" data-ai-monitoring-form>
+                        <label class="crm-field">
+                            <span>Date from</span>
+                            <input class="crm-input" type="date" name="date_from" value="${escapeHtml(filters.date_from)}">
+                        </label>
+                        <label class="crm-field">
+                            <span>Date to</span>
+                            <input class="crm-input" type="date" name="date_to" value="${escapeHtml(filters.date_to)}">
+                        </label>
+                        <label class="crm-field">
+                            <span>Context</span>
+                            <select class="crm-select" name="request_context">
+                                ${renderAiMonitoringOptions(filters.request_context, [
+                                    ['', 'All contexts'],
+                                    ['document_extraction', 'Document extraction'],
+                                    ['lead_intake', 'Lead intake'],
+                                ])}
+                            </select>
+                        </label>
+                        <label class="crm-field">
+                            <span>Status</span>
+                            <select class="crm-select" name="request_status">
+                                ${renderAiMonitoringOptions(filters.request_status, [
+                                    ['', 'All statuses'],
+                                    ['success', 'Success'],
+                                    ['review_required', 'Review required'],
+                                    ['failed', 'Failed'],
+                                ])}
+                            </select>
+                        </label>
+                        <label class="crm-field">
+                            <span>Needs review</span>
+                            <select class="crm-select" name="needs_review">
+                                ${renderAiMonitoringOptions(filters.needs_review, [
+                                    ['', 'Any'],
+                                    ['1', 'Yes'],
+                                    ['0', 'No'],
+                                ])}
+                            </select>
+                        </label>
+                        <label class="crm-field">
+                            <span>Model</span>
+                            <input class="crm-input" type="text" name="model" placeholder="gemini-3.6-flash" value="${escapeHtml(filters.model)}">
+                        </label>
+                        <label class="crm-field">
+                            <span>Document type</span>
+                            <input class="crm-input" type="text" name="document_type" placeholder="payslip, ic, ctos" value="${escapeHtml(filters.document_type)}">
+                        </label>
+                        <label class="crm-field">
+                            <span>Lead ID</span>
+                            <input class="crm-input" type="number" min="1" step="1" name="lead_id" placeholder="Lead ID" value="${escapeHtml(filters.lead_id)}">
+                        </label>
+                        <div class="crm-filter-actions crm-ai-monitoring-filter-actions">
+                            <button type="submit" class="crm-button">Apply Filters</button>
+                            <button type="button" class="crm-button crm-button--ghost" data-action="reset-ai-monitoring-filters">Reset</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderAiMonitoringSummaryView(overview, breakdowns) {
+        return `
+            <section class="crm-stack">
+                <div class="crm-metric-grid crm-ai-monitoring-metric-grid">
+                    ${renderMetricCard('Total Requests', formatCount(overview?.total_requests), 'One row per Gemini attempt')}
+                    ${renderMetricCard('Input Tokens', formatCount(overview?.input_tokens), 'Prompt and file input volume')}
+                    ${renderMetricCard('Output Tokens', formatCount(overview?.output_tokens), 'Gemini response tokens')}
+                    ${renderMetricCard('Total Tokens', formatCount(overview?.total_tokens), 'Combined input and output')}
+                    ${renderMetricCard(`Estimated Cost (${state.aiMonitoring.currency})`, formatCurrencyEstimate(overview?.estimated_cost), aiMonitoringCurrencyNote())}
+                    ${renderMetricCard('Avg Latency', formatLatency(overview?.average_latency_ms), 'Average end-to-end request time')}
+                    ${renderMetricCard('Review Rate', formatPercent(overview?.review_required_rate), `${formatCount(overview?.review_required_requests)} flagged for review`)}
+                    ${renderMetricCard('Failed Requests', formatCount(overview?.failed_requests), `${formatCount(overview?.success_requests)} successful attempts`)}
+                </div>
+
+                <div class="crm-ai-monitoring-breakdown-grid">
+                    ${renderAiMonitoringBreakdownCard('By Context', 'Request volume split across document extraction and lead intake.', breakdowns?.by_context || [], 'context')}
+                    ${renderAiMonitoringBreakdownCard('By Model', 'Compare token volume, cost estimate, and latency by Gemini model.', breakdowns?.by_model || [], 'model')}
+                    ${renderAiMonitoringBreakdownCard('By Document Type', 'Document-side mix when the type was available at request time.', breakdowns?.by_document_type || [], 'document_type')}
+                </div>
+            </section>
+        `;
+    }
+
+    function renderAiMonitoringRequestView(requests, pagination) {
+        return `
+            <section class="crm-card crm-card--solid">
+                <div class="crm-card-head">
+                    <div>
+                        <h2 class="crm-card-title">Request Explorer</h2>
+                        <p class="crm-card-note">Inspect individual Gemini attempts, including retries, failures, and review-required results.</p>
+                    </div>
+                </div>
+                <div class="crm-card-body crm-stack">
+                    ${requests.length ? renderAiMonitoringRequestTableProfessional(requests) : '<div class="crm-empty crm-empty--compact"><strong>No request logs found</strong><span>Try widening the date range or upload a document through the Gemini path.</span></div>'}
+                    ${requests.length ? renderAiMonitoringPagination(pagination) : ''}
+                </div>
+            </section>
+        `;
+    }
+
+    function renderAiMonitoringOptions(selected, options) {
+        return options.map(([value, label]) => `<option value="${escapeHtml(value)}" ${String(selected || '') === String(value) ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('');
+    }
+
+    function renderAiMonitoringBreakdownCard(title, note, items, groupKey) {
+        return `
+            <section class="crm-card crm-card--solid">
+                <div class="crm-card-head">
+                    <div>
+                        <h2 class="crm-card-title">${escapeHtml(title)}</h2>
+                        <p class="crm-card-note">${escapeHtml(note)}</p>
+                    </div>
+                </div>
+                <div class="crm-card-body crm-stack">
+                    ${items.length ? `
+                        <div class="crm-table crm-table--compact">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>${escapeHtml(groupKey.replaceAll('_', ' '))}</th>
+                                        <th>Requests</th>
+                                        <th>Total Tokens</th>
+                                        <th>Est. Cost (${escapeHtml(state.aiMonitoring.currency)})</th>
+                                        <th>Avg Latency</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${items.map((item) => `
+                                        <tr>
+                                            <td><div class="crm-table-primary">${escapeHtml(formatAiMonitoringGroupLabel(groupKey, item.dimension))}</div></td>
+                                            <td>${escapeHtml(formatCount(item.total_requests))}</td>
+                                            <td>${escapeHtml(formatCount(item.total_tokens))}</td>
+                                            <td>${escapeHtml(formatCurrencyEstimate(item.estimated_cost))}</td>
+                                            <td>${escapeHtml(formatLatency(item.average_latency_ms))}</td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    ` : '<div class="crm-empty crm-empty--compact"><strong>No data in this range</strong><span>There are no matching Gemini requests for this breakdown yet.</span></div>'}
+                </div>
+            </section>
+        `;
+    }
+
+    function renderAiMonitoringRequestTable(requests) {
+        return `
+            <div class="crm-table crm-ai-monitoring-table">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Lead</th>
+                            <th>Document</th>
+                            <th>Model</th>
+                            <th>Tokens</th>
+                            <th>Cost (${escapeHtml(state.aiMonitoring.currency)})</th>
+                            <th>Latency</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${requests.map((request) => `
+                            <tr>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(formatDateTime(request.request_finished_at || request.request_started_at))}</div>
+                                    <div class="crm-meta-text">${escapeHtml(request.provider || 'gemini')}</div>
+                                </td>
+                                <td>${escapeHtml(formatRequestContextLabel(request.request_context))}</td>
+                                <td>${escapeHtml(request.lead_id ? `#${request.lead_id}` : '—')}</td>
+                                <td>${escapeHtml(request.lead_document_id ? `#${request.lead_document_id}` : '—')}</td>
+                                <td>${escapeHtml(formatDocumentTypeLabel(request.document_type))}</td>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(request.model || 'Unknown')}</div>
+                                    <div class="crm-meta-text">${escapeHtml(request.input_filename || request.input_mime_type || 'No file metadata')}</div>
+                                </td>
+                                <td>${escapeHtml(formatCount(request.input_tokens))}</td>
+                                <td>${escapeHtml(formatCount(request.output_tokens))}</td>
+                                <td>${escapeHtml(formatCount(request.total_tokens))}</td>
+                                <td>${escapeHtml(formatCurrencyEstimate(request.estimated_cost))}</td>
+                                <td>${escapeHtml(formatLatency(request.latency_ms))}</td>
+                                <td>
+                                    <span class="crm-badge crm-badge--compact" data-tone="${statusToneForRequest(request.request_status)}">${escapeHtml(formatRequestStatusLabel(request.request_status))}</span>
+                                    ${request.error_message ? `<div class="crm-meta-text">${escapeHtml(request.error_message)}</div>` : ''}
+                                </td>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(request.needs_review ? 'Needs review' : 'No review')}</div>
+                                    <div class="crm-meta-text">${escapeHtml(formatReviewReasons(request.review_reasons))}</div>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    function renderAiMonitoringRequestTableClean(requests) {
+        return `
+            <div class="crm-table crm-ai-monitoring-table crm-ai-monitoring-table--clean">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Lead</th>
+                            <th>Document</th>
+                            <th>Model</th>
+                            <th>Tokens</th>
+                            <th>Cost (${escapeHtml(state.aiMonitoring.currency)})</th>
+                            <th>Latency</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${requests.map((request) => `
+                            <tr>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(formatDateTime(request.request_finished_at || request.request_started_at))}</div>
+                                    <div class="crm-meta-text">${escapeHtml(formatRequestContextLabel(request.request_context))}</div>
+                                </td>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(request.lead_id ? `#${request.lead_id}` : 'N/A')}</div>
+                                    <div class="crm-meta-text">${escapeHtml(request.lead_document_id ? `Document #${request.lead_document_id}` : 'No linked document')}</div>
+                                </td>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(request.input_filename || 'Untitled request')}</div>
+                                    <div class="crm-meta-text">${escapeHtml(renderAiMonitoringDocumentMeta(request))}</div>
+                                </td>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(request.model || 'Unknown')}</div>
+                                    <div class="crm-meta-text">${escapeHtml(request.provider || 'gemini')}</div>
+                                </td>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(formatCount(request.total_tokens))}</div>
+                                    <div class="crm-meta-text">${escapeHtml(`In ${formatCount(request.input_tokens)} • Out ${formatCount(request.output_tokens)}`)}</div>
+                                </td>
+                                <td class="crm-ai-monitoring-table-num">${escapeHtml(formatCurrencyEstimate(request.estimated_cost))}</td>
+                                <td class="crm-ai-monitoring-table-num">${escapeHtml(formatLatency(request.latency_ms))}</td>
+                                <td class="crm-ai-monitoring-table-status">
+                                    <span class="crm-badge crm-badge--compact" data-tone="${statusToneForRequest(request.request_status)}">${escapeHtml(formatRequestStatusLabel(request.request_status))}</span>
+                                    <div class="crm-meta-text crm-ai-monitoring-status-detail">${escapeHtml(renderAiMonitoringStatusDetail(request))}</div>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    function renderAiMonitoringDocumentMeta(request) {
+        const parts = [];
+
+        if (request.lead_document_id) {
+            parts.push(`#${request.lead_document_id}`);
+        }
+
+        parts.push(formatDocumentTypeLabel(request.document_type));
+
+        if (request.input_mime_type) {
+            parts.push(request.input_mime_type);
+        }
+
+        return parts.join(' • ');
+    }
+
+    function renderAiMonitoringStatusDetail(request) {
+        if (request.error_message) {
+            return request.error_message;
+        }
+
+        if (request.needs_review) {
+            const reasons = formatReviewReasons(request.review_reasons);
+
+            return reasons !== 'None' ? `Needs review • ${reasons}` : 'Needs review';
+        }
+
+        return 'Completed without review';
+    }
+
+    function renderAiMonitoringRequestTableProfessional(requests) {
+        return `
+            <div class="crm-table crm-ai-monitoring-table crm-ai-monitoring-table--clean">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Lead</th>
+                            <th>Document</th>
+                            <th>Model</th>
+                            <th>Tokens</th>
+                            <th>Cost (${escapeHtml(state.aiMonitoring.currency)})</th>
+                            <th>Latency</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${requests.map((request) => `
+                            <tr>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(formatDateTime(request.request_finished_at || request.request_started_at))}</div>
+                                    <div class="crm-meta-text">${escapeHtml(formatRequestContextLabel(request.request_context))}</div>
+                                </td>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(request.lead_id ? `#${request.lead_id}` : 'N/A')}</div>
+                                    <div class="crm-meta-text">${escapeHtml(request.lead_document_id ? `Document #${request.lead_document_id}` : 'No linked document')}</div>
+                                </td>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(request.input_filename || 'Untitled request')}</div>
+                                    <div class="crm-meta-text">${escapeHtml(renderAiMonitoringDocumentMetaProfessional(request))}</div>
+                                </td>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(request.model || 'Unknown')}</div>
+                                    <div class="crm-meta-text">${escapeHtml(request.provider || 'gemini')}</div>
+                                </td>
+                                <td>
+                                    <div class="crm-table-primary">${escapeHtml(formatCount(request.total_tokens))}</div>
+                                    <div class="crm-meta-text">${escapeHtml(`In ${formatCount(request.input_tokens)} / Out ${formatCount(request.output_tokens)}`)}</div>
+                                </td>
+                                <td class="crm-ai-monitoring-table-num">
+                                    <div class="crm-table-primary">${escapeHtml(formatCurrencyEstimate(request.estimated_cost))}</div>
+                                </td>
+                                <td class="crm-ai-monitoring-table-num">
+                                    <div class="crm-table-primary">${escapeHtml(formatLatency(request.latency_ms))}</div>
+                                </td>
+                                <td class="crm-ai-monitoring-table-status">
+                                    <span class="crm-badge crm-badge--compact" data-tone="${statusToneForRequest(request.request_status)}">${escapeHtml(formatRequestStatusLabel(request.request_status))}</span>
+                                    <div class="crm-meta-text crm-ai-monitoring-status-detail" title="${escapeHtml(renderAiMonitoringStatusDetailProfessional(request))}">${escapeHtml(renderAiMonitoringStatusDetailProfessional(request))}</div>
+                                </td>
+                            </tr>
+                        `).join('')}
+                    </tbody>
+                </table>
+            </div>
+        `;
+    }
+
+    function renderAiMonitoringDocumentMetaProfessional(request) {
+        const parts = [];
+
+        if (request.lead_document_id) {
+            parts.push(`#${request.lead_document_id}`);
+        }
+
+        parts.push(formatDocumentTypeLabel(request.document_type));
+
+        if (request.input_mime_type) {
+            parts.push(request.input_mime_type);
+        }
+
+        return parts.join(' / ');
+    }
+
+    function renderAiMonitoringStatusDetailProfessional(request) {
+        if (request.error_message) {
+            return request.error_message;
+        }
+
+        if (request.needs_review) {
+            const reasons = formatReviewReasons(request.review_reasons);
+
+            return reasons !== 'None' ? `Needs review / ${reasons}` : 'Needs review';
+        }
+
+        return 'Completed without review';
+    }
+
+    function renderAiMonitoringPagination(pagination) {
+        const total = Number(pagination.total || 0);
+        const currentPage = Number(pagination.current_page || 1);
+        const lastPage = Number(pagination.last_page || 1);
+        const perPage = Number(pagination.per_page || 25);
+        const start = total ? ((currentPage - 1) * perPage) + 1 : 0;
+        const end = total ? Math.min(currentPage * perPage, total) : 0;
+
+        return `
+            <div class="crm-pagination">
+                <div class="crm-pagination-summary">Showing ${start}-${end} of ${total} requests</div>
+                <div class="crm-pagination-controls">
+                    <button type="button" class="crm-button crm-button--ghost crm-button--small" data-ai-request-page-nav="prev" ${currentPage <= 1 ? 'disabled' : ''}>Previous</button>
+                    <span class="crm-pagination-page">Page ${currentPage} of ${lastPage}</span>
+                    <button type="button" class="crm-button crm-button--ghost crm-button--small" data-ai-request-page-nav="next" ${currentPage >= lastPage ? 'disabled' : ''}>Next</button>
+                </div>
+            </div>
         `;
     }
 
@@ -2771,7 +3417,6 @@ if (appRoot) {
 
         const lead = state.selectedLead;
         const latestCalculation = lead.calculation_results?.[lead.calculation_results.length - 1] || null;
-        const workflowStages = availableWorkflowStages(lead);
         const activeStage = resolveWorkflowStage(lead, state.activeLeadWorkflowStage);
 
         return `
@@ -2790,13 +3435,9 @@ if (appRoot) {
                         </div>
                     </div>
                 </div>
-                <div class="crm-card-body crm-stack crm-modal-body">
-                    <section class="crm-workflow-nav" id="crm-lead-workflow-nav">
-                        ${renderLeadWorkflowTabs(lead, activeStage)}
-                    </section>
-
-                    <div id="crm-lead-stage-panel">
-                        ${renderWorkflowStagePanel(lead, activeStage, latestCalculation)}
+                <div class="crm-card-body crm-modal-body">
+                    <div id="crm-lead-modal-content">
+                        ${renderLeadModalContent(lead, activeStage, latestCalculation)}
                     </div>
                 </div>
             </section>
@@ -2830,6 +3471,247 @@ if (appRoot) {
                 </span>
             </button>
         `).join('');
+    }
+
+    function renderLeadModalContent(lead, activeStage, latestCalculation) {
+        if (state.leadModalView === 'document_detail') {
+            return renderDocumentDetailView(lead);
+        }
+
+        return `
+            <div class="crm-stack">
+                <section class="crm-workflow-nav" id="crm-lead-workflow-nav">
+                    ${renderLeadWorkflowTabs(lead, activeStage)}
+                </section>
+
+                <div id="crm-lead-stage-panel">
+                    ${renderWorkflowStagePanel(lead, activeStage, latestCalculation)}
+                </div>
+            </div>
+        `;
+    }
+
+    function renderDocumentDetailView(lead) {
+        const detailState = state.selectedDocumentDetail;
+        const leadDocument = leadDocumentById(detailState?.documentId);
+        const extraction = extractedDataByDocumentId(detailState?.documentId);
+
+        if (!detailState || !leadDocument) {
+            state.leadModalView = 'overview';
+            state.selectedDocumentDetail = null;
+
+            return `
+                <div class="crm-stack">
+                    <div class="crm-empty">
+                        <strong>Document not available</strong>
+                        <span>The selected document could not be found. Return to lead details to continue.</span>
+                    </div>
+                </div>
+            `;
+        }
+
+        return `
+            <section class="crm-stack crm-document-detail">
+                <div class="crm-document-detail-topbar">
+                    <div class="crm-document-breadcrumbs" aria-label="Breadcrumb">
+                        <span>Lead Details</span>
+                        <span>/</span>
+                        <span>${escapeHtml(detailState.source === 'checklist' ? 'Checklist' : 'Uploaded Files')}</span>
+                        <span>/</span>
+                        <span>${escapeHtml(detailState.label || leadDocument.original_filename || 'Document')}</span>
+                    </div>
+                    <button type="button" class="crm-button crm-button--ghost crm-button--small" data-action="close-document-detail">Back</button>
+                </div>
+                <div class="crm-document-detail-layout">
+                    <section class="crm-card crm-card--solid">
+                        <div class="crm-card-head">
+                            <div>
+                                <h3 class="crm-card-title">Document Preview</h3>
+                                <p class="crm-card-note">${escapeHtml(leadDocument.original_filename || 'Uploaded document')}</p>
+                            </div>
+                        </div>
+                        <div class="crm-card-body">
+                            ${renderDocumentDetailPreview(lead, leadDocument)}
+                        </div>
+                    </section>
+                    <section class="crm-card crm-card--solid">
+                        <div class="crm-card-head">
+                            <div>
+                                <h3 class="crm-card-title">Extracted Information</h3>
+                                <p class="crm-card-note">Review the extracted values and document detection result.</p>
+                            </div>
+                        </div>
+                        <div class="crm-card-body crm-stack">
+                            ${renderDocumentExtractedInfo(leadDocument, extraction)}
+                        </div>
+                    </section>
+                </div>
+            </section>
+        `;
+    }
+
+    function renderDocumentDetailPreview(lead, leadDocument) {
+        const mimeType = String(leadDocument?.metadata?.mime_type || '').toLowerCase();
+        const previewUrl = `${apiBase}/leads/${lead.id}/documents/${leadDocument.id}/preview`;
+        const openUrl = escapeHtml(previewUrl);
+
+        if (mimeType.startsWith('image/')) {
+            return `
+                <div class="crm-document-preview">
+                    <img class="crm-document-preview-media" src="${openUrl}" alt="${escapeHtml(leadDocument.original_filename || 'Document preview')}">
+                </div>
+                <div class="crm-document-preview-actions">
+                    <a class="crm-button crm-button--ghost crm-button--small" href="${openUrl}" target="_blank" rel="noopener noreferrer">Open original</a>
+                </div>
+            `;
+        }
+
+        if (mimeType === 'application/pdf' || String(leadDocument.original_filename || '').toLowerCase().endsWith('.pdf')) {
+            return `
+                <div class="crm-document-preview crm-document-preview--pdf">
+                    <iframe class="crm-document-preview-frame" src="${openUrl}" title="${escapeHtml(leadDocument.original_filename || 'Document preview')}"></iframe>
+                </div>
+                <div class="crm-document-preview-actions">
+                    <a class="crm-button crm-button--ghost crm-button--small" href="${openUrl}" target="_blank" rel="noopener noreferrer">Open original</a>
+                </div>
+            `;
+        }
+
+        return `
+            <div class="crm-empty">
+                <strong>Inline preview unavailable</strong>
+                <span>This document type cannot be previewed inline in the current browser.</span>
+            </div>
+            <div class="crm-document-preview-actions">
+                <a class="crm-button crm-button--ghost crm-button--small" href="${openUrl}" target="_blank" rel="noopener noreferrer">Open original</a>
+            </div>
+        `;
+    }
+
+    function renderDocumentExtractedInfo(leadDocument, extraction) {
+        const structuredFields = extraction?.structured_fields || {};
+        const extractedFields = structuredFields.fields || {};
+        const classification = {
+            ...(leadDocument.classification || {}),
+            ...(structuredFields.classification || {}),
+        };
+        const isIcDocument = isIcDocumentType(leadDocument, classification);
+
+        return `
+            ${isIcDocument ? renderIcExtractedFields(extractedFields) : renderUnsupportedExtractedFieldsMessage()}
+            ${renderDocumentDetectionMetadata(leadDocument, extraction, classification)}
+            ${renderDocumentReviewMetadata(extraction, classification)}
+        `;
+    }
+
+    function renderIcExtractedFields(fields) {
+        const items = [
+            ['Full Name', fields.full_name],
+            ['IC Number', fields.ic_number],
+            ['Date of Birth', fields.date_of_birth],
+            ['Gender', fields.gender],
+            ['Address', fields.address],
+        ];
+
+        return `
+            <section class="crm-stack crm-document-detail-section">
+                <div class="crm-section-heading">
+                    <h4>Extracted Data</h4>
+                </div>
+                <div class="crm-document-form">
+                    ${items.map(([label, value]) => `
+                        ${renderDocumentFormRow(label, displayExtractedValue(value))}
+                    `).join('')}
+                </div>
+            </section>
+        `;
+    }
+
+    function renderUnsupportedExtractedFieldsMessage() {
+        return `
+            <section class="crm-stack crm-document-detail-section">
+                <div class="crm-section-heading">
+                    <h4>Extracted Data</h4>
+                </div>
+                <div class="crm-empty crm-empty--compact">
+                    <strong>Field display is currently enabled for IC only.</strong>
+                    <span>Other document types will reuse this review screen in later phases.</span>
+                </div>
+            </section>
+        `;
+    }
+
+    function renderDocumentDetectionMetadata(leadDocument, extraction, classification) {
+        const items = [
+            ['Document Type', formatAuditValue(classification.document_type || leadDocument.effective_document_type || leadDocument.document_type || 'other')],
+            ['IC Side', classification.ic_side ? formatAuditValue(classification.ic_side) : 'Not extracted'],
+            ['Confidence', formatAuditValue(classification.confidence || extraction?.structured_fields?.confidence || 'medium')],
+            ['Summary', extraction?.summary || 'No extraction summary'],
+        ];
+
+        return `
+            <section class="crm-stack crm-document-detail-section">
+                <div class="crm-section-heading">
+                    <h4>Document Detection</h4>
+                </div>
+                <div class="crm-document-form">
+                    ${items.map(([label, value]) => `
+                        ${renderDocumentFormRow(label, displayExtractedValue(value))}
+                    `).join('')}
+                </div>
+            </section>
+        `;
+    }
+
+    function renderDocumentReviewMetadata(extraction, classification) {
+        const needsReview = Boolean(classification.needs_review ?? extraction?.structured_fields?.needs_review ?? false);
+        const reviewReasons = Array.isArray(classification.review_reasons) && classification.review_reasons.length
+            ? classification.review_reasons
+            : Array.isArray(extraction?.structured_fields?.review_reasons)
+                ? extraction.structured_fields.review_reasons
+                : [];
+
+        return `
+            <section class="crm-stack crm-document-detail-section">
+                <div class="crm-section-heading">
+                    <h4>Warnings</h4>
+                </div>
+                <div class="crm-document-form">
+                    ${renderDocumentFormRow('Needs Review', needsReview ? 'Yes' : 'No')}
+                    ${renderDocumentFormRow('Review Reasons', reviewReasons.length ? reviewReasons.map((reason) => formatAuditValue(reason)).join(', ') : 'None')}
+                </div>
+            </section>
+        `;
+    }
+
+    function renderDocumentFormRow(label, value) {
+        return `
+            <div class="crm-document-form-row">
+                <div class="crm-document-form-label">${escapeHtml(label)}</div>
+                <div class="crm-document-form-value">${escapeHtml(value)}</div>
+            </div>
+        `;
+    }
+
+    function isIcDocumentType(leadDocument, classification) {
+        const assignmentKey = filledAssignmentKey(leadDocument);
+
+        return assignmentKey.startsWith('ic_')
+            || String(classification.document_type || '').toLowerCase() === 'ic'
+            || String(leadDocument.effective_document_type || '').toLowerCase() === 'ic'
+            || String(leadDocument.document_type || '').toLowerCase() === 'ic';
+    }
+
+    function displayExtractedValue(value) {
+        if (value === null || value === undefined) {
+            return 'Not extracted';
+        }
+
+        if (typeof value === 'string' && value.trim() === '') {
+            return 'Not extracted';
+        }
+
+        return String(value);
     }
 
     function renderWorkflowStagePanel(lead, activeStage, latestCalculation) {
@@ -3002,7 +3884,7 @@ if (appRoot) {
 
     function renderChecklistRowAction(slot) {
         if (slot.is_complete && slot.document) {
-            return `<div class="crm-checklist-action-cell">${renderIconButton('preview', 'Preview document', `data-preview-document="${slot.document.id}"`)}</div>`;
+            return `<div class="crm-checklist-action-cell">${renderIconButton('preview', 'Preview document', `data-preview-document="${slot.document.id}" data-preview-source="checklist" data-preview-label="${escapeHtml(slot.label)}"`)}</div>`;
         }
 
         if (slot.needs_review && slot.document) {
@@ -3128,7 +4010,7 @@ if (appRoot) {
                 </td>
                 <td>${escapeHtml(String(detail || 'N/A'))}</td>
                 <td>${formatDateTime(document.uploaded_at)}</td>
-                <td>${uploadStatus === 'deleting' ? '<span class="crm-meta-text">Removing...</span>' : `<div class="crm-inline">${renderIconButton('preview', 'Preview document', `data-preview-document="${document.id}"`)}${renderIconButton('delete', 'Remove document', `data-delete-document="${document.id}" ${deleteBlocked ? 'disabled' : ''}`, 'crm-button--danger-ghost')}</div>`}</td>
+                <td>${uploadStatus === 'deleting' ? '<span class="crm-meta-text">Removing...</span>' : `<div class="crm-inline">${renderIconButton('preview', 'Preview document', `data-preview-document="${document.id}" data-preview-source="uploaded_files" data-preview-label="${escapeHtml(document.original_filename || 'Document')}"`)}${renderIconButton('delete', 'Remove document', `data-delete-document="${document.id}" ${deleteBlocked ? 'disabled' : ''}`, 'crm-button--danger-ghost')}</div>`}</td>
             </tr>
         `;
     }
@@ -3329,6 +4211,14 @@ if (appRoot) {
             return `
                 <svg class="crm-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                     <path d="M9 3h6l1 2h4v2H4V5h4l1-2zm1 7h2v8h-2v-8zm4 0h2v8h-2v-8zM7 10h2v8H7v-8z" fill="currentColor"></path>
+                </svg>
+            `;
+        }
+
+        if (icon === 'filter') {
+            return `
+                <svg class="crm-action-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M4 6h16l-6.3 7.1v4.5l-3.4 1.8v-6.3L4 6z" fill="currentColor"></path>
                 </svg>
             `;
         }
@@ -3547,6 +4437,104 @@ if (appRoot) {
             });
         });
 
+        document.querySelector('[data-ai-monitoring-form]')?.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const formData = new FormData(event.currentTarget);
+
+            state.aiMonitoring.filters = {
+                date_from: String(formData.get('date_from') || ''),
+                date_to: String(formData.get('date_to') || ''),
+                request_context: String(formData.get('request_context') || ''),
+                model: String(formData.get('model') || ''),
+                document_type: String(formData.get('document_type') || ''),
+                request_status: String(formData.get('request_status') || ''),
+                needs_review: String(formData.get('needs_review') || ''),
+                lead_id: String(formData.get('lead_id') || ''),
+            };
+            state.aiMonitoring.pagination.current_page = 1;
+            state.aiMonitoring.filtersOpen = false;
+            await loadAiMonitoringData(1);
+        });
+
+        document.querySelector('[data-action="reset-ai-monitoring-filters"]')?.addEventListener('click', async () => {
+            state.aiMonitoring.filters = initialAiMonitoringFilters();
+            state.aiMonitoring.currency = ['USD', 'MYR'].includes(aiMonitoringDefaultCurrency) ? aiMonitoringDefaultCurrency : 'USD';
+            state.aiMonitoring.pagination.current_page = 1;
+            state.aiMonitoring.filtersOpen = false;
+            render();
+            await loadAiMonitoringData(1);
+        });
+
+        document.querySelector('[data-action="clear-ai-monitoring-logs"]')?.addEventListener('click', () => {
+            requestConfirm({
+                title: 'Delete all AI monitoring records?',
+                message: 'This will permanently remove every AI monitoring request log, including token usage, estimated cost, latency, and failure history.',
+                confirmLabel: 'Delete all records',
+                cancelLabel: 'Keep records',
+                tone: 'danger',
+                onConfirm: async () => {
+                    state.loadingAiMonitoring = true;
+                    state.aiMonitoring.filtersOpen = false;
+                    render();
+
+                    try {
+                        const payload = await apiRequest('/ai-monitoring/logs', {
+                            method: 'DELETE',
+                        });
+
+                        state.aiMonitoring.overview = null;
+                        state.aiMonitoring.breakdowns = null;
+                        state.aiMonitoring.requests = [];
+                        state.aiMonitoring.pagination = { total: 0, current_page: 1, last_page: 1, per_page: 25 };
+
+                        pushNotice(payload?.message || 'AI monitoring records deleted successfully.');
+                        await loadAiMonitoringData(1);
+                    } catch (error) {
+                        state.loadingAiMonitoring = false;
+                        render();
+                        pushNotice(error.message, 'error');
+                    }
+                },
+            });
+        });
+
+        document.querySelector('[data-ai-monitoring-currency]')?.addEventListener('change', (event) => {
+            const nextCurrency = String(event.currentTarget.value || 'USD').toUpperCase();
+            state.aiMonitoring.currency = ['USD', 'MYR'].includes(nextCurrency) ? nextCurrency : 'USD';
+            render();
+        });
+
+        document.querySelectorAll('[data-ai-monitoring-view]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const nextView = button.dataset.aiMonitoringView === 'requests' ? 'requests' : 'summary';
+
+                if (state.aiMonitoring.view === nextView) {
+                    return;
+                }
+
+                state.aiMonitoring.view = nextView;
+                render();
+            });
+        });
+
+        document.querySelector('[data-action="toggle-ai-monitoring-filters"]')?.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            state.aiMonitoring.filtersOpen = !state.aiMonitoring.filtersOpen;
+            render();
+        });
+
+        document.querySelectorAll('[data-ai-request-page-nav]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                const direction = button.dataset.aiRequestPageNav;
+                const nextPage = direction === 'prev'
+                    ? state.aiMonitoring.pagination.current_page - 1
+                    : state.aiMonitoring.pagination.current_page + 1;
+
+                await loadAiMonitoringData(nextPage);
+            });
+        });
+
         document.querySelectorAll('[data-sort-field]').forEach((button) => {
             button.addEventListener('click', () => {
                 toggleLeadSort(button.dataset.sortField);
@@ -3709,7 +4697,18 @@ if (appRoot) {
 
         document.querySelectorAll('[data-preview-document]').forEach((button) => {
             bindOnce(button, 'PreviewDocument', 'click', () => {
-                previewLeadDocument(button.dataset.previewDocument);
+                openLeadDocumentDetail(
+                    button.dataset.previewDocument,
+                    button.dataset.previewSource || 'uploaded_files',
+                    button.dataset.previewLabel || '',
+                );
+            });
+        });
+
+        document.querySelectorAll('[data-action="close-document-detail"]').forEach((button) => {
+            bindOnce(button, 'CloseDocumentDetail', 'click', (event) => {
+                event.preventDefault();
+                closeLeadDocumentDetail();
             });
         });
 
@@ -3745,6 +4744,12 @@ if (appRoot) {
                 return;
             }
 
+            if (state.page === 'ai-monitoring' && state.aiMonitoring.filtersOpen) {
+                state.aiMonitoring.filtersOpen = false;
+                render();
+                return;
+            }
+
             if (state.confirmDialog) {
                 closeConfirmDialog();
                 return;
@@ -3753,6 +4758,21 @@ if (appRoot) {
             if (state.selectedLeadId) {
                 closeLeadModal();
             }
+        });
+
+        document.addEventListener('click', (event) => {
+            if (state.page !== 'ai-monitoring' || !state.aiMonitoring.filtersOpen) {
+                return;
+            }
+
+            const shell = event.target instanceof Element ? event.target.closest('[data-ai-monitoring-filter-shell]') : null;
+
+            if (shell) {
+                return;
+            }
+
+            state.aiMonitoring.filtersOpen = false;
+            render();
         });
     }
 
@@ -3910,6 +4930,165 @@ if (appRoot) {
             hour: '2-digit',
             minute: '2-digit',
         }).format(date);
+    }
+
+    function formatCount(value) {
+        const amount = Number(value ?? 0);
+        if (Number.isNaN(amount)) {
+            return String(value ?? 0);
+        }
+
+        return new Intl.NumberFormat('en-MY', { maximumFractionDigits: 0 }).format(amount);
+    }
+
+    function formatPercent(value) {
+        const amount = Number(value ?? 0);
+        if (Number.isNaN(amount)) {
+            return '0%';
+        }
+
+        return `${amount.toFixed(1)}%`;
+    }
+
+    function formatCurrencyEstimate(value) {
+        if (value === null || value === undefined || value === '') {
+            return 'N/A';
+        }
+
+        const amount = aiMonitoringDisplayCost(value);
+        if (Number.isNaN(amount)) {
+            return String(value);
+        }
+
+        const currency = state.aiMonitoring?.currency || 'USD';
+        const locale = currency === 'MYR' ? 'en-MY' : 'en-US';
+        let fractionDigits = 2;
+
+        if (amount > 0 && amount < 0.01) {
+            fractionDigits = 6;
+        } else if (amount > 0 && amount < 1) {
+            fractionDigits = 4;
+        }
+
+        return new Intl.NumberFormat(locale, {
+            style: 'currency',
+            currency,
+            minimumFractionDigits: fractionDigits,
+            maximumFractionDigits: fractionDigits,
+        }).format(amount);
+    }
+
+    function aiMonitoringDisplayCost(value) {
+        const amount = Number(value);
+        if (Number.isNaN(amount)) {
+            return Number.NaN;
+        }
+
+        if ((state.aiMonitoring?.currency || 'USD') === 'MYR') {
+            return amount * aiMonitoringUsdToMyrExchangeRate();
+        }
+
+        return amount;
+    }
+
+    function aiMonitoringUsdToMyrExchangeRate() {
+        return aiMonitoringUsdToMyrRate > 0 ? aiMonitoringUsdToMyrRate : 1;
+    }
+
+    function aiMonitoringCurrencyNote() {
+        if ((state.aiMonitoring?.currency || 'USD') === 'MYR') {
+            return `Converted from USD at ${aiMonitoringUsdToMyrExchangeRate().toFixed(4)} MYR/USD`;
+        }
+
+        return 'Model pricing estimate in USD';
+    }
+
+    function formatLatency(value) {
+        const amount = Number(value ?? 0);
+        if (Number.isNaN(amount)) {
+            return 'N/A';
+        }
+
+        if (amount < 1000) {
+            return `${Math.round(amount)} ms`;
+        }
+
+        return `${(amount / 1000).toFixed(2)} s`;
+    }
+
+    function formatRequestContextLabel(value) {
+        const labels = {
+            document_extraction: 'Document extraction',
+            lead_intake: 'Lead intake',
+        };
+
+        return labels[String(value || '')] || formatDocumentTypeLabel(value || 'unknown');
+    }
+
+    function formatRequestStatusLabel(value) {
+        const labels = {
+            success: 'Success',
+            failed: 'Failed',
+            review_required: 'Review required',
+        };
+
+        return labels[String(value || '')] || 'Unknown';
+    }
+
+    function formatDocumentTypeLabel(value) {
+        if (!value) {
+            return 'Unknown';
+        }
+
+        return String(value)
+            .replaceAll('_', ' ')
+            .replace(/\b\w/g, (char) => char.toUpperCase());
+    }
+
+    function formatAiMonitoringGroupLabel(groupKey, value) {
+        if (!value) {
+            return groupKey === 'document_type' ? 'Unknown / not available' : 'Unknown';
+        }
+
+        if (groupKey === 'context') {
+            return formatRequestContextLabel(value);
+        }
+
+        if (groupKey === 'document_type') {
+            return formatDocumentTypeLabel(value);
+        }
+
+        return String(value);
+    }
+
+    function formatReviewReasons(reasons) {
+        const values = Array.isArray(reasons)
+            ? reasons.filter((reason) => reason !== null && reason !== undefined && String(reason).trim() !== '')
+            : [];
+
+        if (!values.length) {
+            return 'None';
+        }
+
+        return values
+            .map((reason) => String(reason).replaceAll('_', ' '))
+            .join(', ');
+    }
+
+    function statusToneForRequest(status) {
+        if (status === 'success') {
+            return 'matched';
+        }
+
+        if (status === 'review_required') {
+            return 'review';
+        }
+
+        if (status === 'failed') {
+            return 'failed';
+        }
+
+        return 'stage';
     }
 
     function whatsappLink(value) {

@@ -5,6 +5,7 @@ import binascii
 import os
 import re
 import time
+from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
@@ -96,6 +97,83 @@ CONTROLLED_OCR_PHRASES = [
         "threshold": 0.9,
     },
 ]
+
+IC_NAME_HEADER_BLACKLIST = {
+    "kad pengenalan",
+    "identity card",
+    "malaysia",
+    "mykad",
+    "kad pengenalan malaysia",
+    "malaysia identity card",
+}
+
+IC_METADATA_TERMS = {
+    "warganegara",
+    "citizen",
+    "agama",
+    "religion",
+    "islam",
+    "lelaki",
+    "perempuan",
+    "jantina",
+    "gender",
+    "alamat",
+    "address",
+    "touch n go",
+    "touchngo",
+    "ketua pengarah",
+    "pendaftaran negara",
+    "citizenship",
+}
+
+IC_ADDRESS_HINTS = {
+    "no",
+    "lot",
+    "jalan",
+    "lorong",
+    "taman",
+    "kampung",
+    "bandar",
+    "persiaran",
+    "blok",
+    "block",
+    "unit",
+    "tingkat",
+    "flat",
+    "pangsapuri",
+    "apartment",
+    "residence",
+    "residensi",
+    "kondo",
+    "kondominium",
+    "lebuh",
+    "seksyen",
+    "mukim",
+    "daerah",
+}
+
+MALAYSIAN_STATE_TOKENS = {
+    "johor",
+    "selangor",
+    "kedah",
+    "kelantan",
+    "melaka",
+    "malacca",
+    "negeri sembilan",
+    "n. sembilan",
+    "pahang",
+    "perak",
+    "perlis",
+    "pulau pinang",
+    "penang",
+    "sabah",
+    "sarawak",
+    "terengganu",
+    "wilayah persekutuan",
+    "kuala lumpur",
+    "labuan",
+    "putrajaya",
+}
 
 
 def process_document(
@@ -225,7 +303,7 @@ def extract_text(payload: bytes, mime_type: Optional[str], filename: Optional[st
     lower_name = (filename or "").lower()
 
     if mime.startswith("text/") or lower_name.endswith(".txt"):
-        return normalize_text(payload.decode("utf-8", errors="ignore")), "text_decode"
+        return preserve_multiline_text(payload.decode("utf-8", errors="ignore")), "text_decode"
 
     if mime == "application/pdf" or lower_name.endswith(".pdf"):
         return extract_text_from_pdf(payload)
@@ -246,7 +324,7 @@ def extract_text_from_image(payload: bytes) -> tuple[str, str]:
     ocr_image = image.convert("L")
     text = pytesseract.image_to_string(ocr_image, config="--psm 6")
 
-    return normalize_text(text), "image_ocr"
+    return preserve_multiline_text(text), "image_ocr"
 
 
 def extract_text_from_pdf(payload: bytes) -> tuple[str, str]:
@@ -286,7 +364,7 @@ def extract_text_from_pdf_reader(payload: bytes) -> str:
         if extracted:
             page_text.append(extracted)
 
-    return normalize_text(" ".join(page_text))
+    return preserve_multiline_text("\n".join(page_text))
 
 
 def extract_text_from_pdf_ocr(payload: bytes) -> str:
@@ -304,7 +382,7 @@ def extract_text_from_pdf_ocr(payload: bytes) -> str:
         if extracted:
             page_text.append(extracted)
 
-    return normalize_text(" ".join(page_text))
+    return preserve_multiline_text("\n".join(page_text))
 
 
 def extract_text_from_binary(payload: bytes) -> str:
@@ -316,6 +394,11 @@ def extract_text_from_binary(payload: bytes) -> str:
 
 def normalize_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def preserve_multiline_text(value: str) -> str:
+    lines = [normalize_text(line) for line in re.split(r"[\r\n]+", value)]
+    return "\n".join(line for line in lines if line)
 
 
 def analyze_text(raw_text: str, filename: Optional[str] = None) -> dict:
@@ -341,7 +424,7 @@ def analyze_text(raw_text: str, filename: Optional[str] = None) -> dict:
     signals = collect_signal_matches(lowered)
     scores = score_document_types(signals, lowered)
     document_type, confidence, decision_reasons = choose_document_type(scores, signals)
-    fields = extract_common_fields(normalized, lowered, document_type)
+    fields = extract_common_fields(normalized, lowered, document_type, raw_text=raw_text)
     statement_year, statement_month, statement_period = extract_statement_period(lowered, filename)
     ic_side = detect_ic_side(signals) if document_type == "ic" and signals["has_strong_ic_evidence"] else None
     contradictory_reasons = contradictory_document_reasons(document_type, signals, statement_period, fields)
@@ -577,12 +660,13 @@ def choose_document_type(scores: dict[str, int], signals: dict[str, object]) -> 
     return best_type, "medium", []
 
 
-def extract_common_fields(text: str, lowered: str, document_type: str) -> dict:
+def extract_common_fields(text: str, lowered: str, document_type: str, raw_text: Optional[str] = None) -> dict:
     fields = {
         "full_name": extract_name(text),
         "ic_number": find_ic_number(text),
         "date_of_birth": extract_date_of_birth(text),
         "address": extract_address(text),
+        "gender": None,
         "employer": extract_labeled_value(text, ["employer", "company", "majikan"]),
         "employment_type": extract_labeled_value(text, ["employment type", "employment status", "jenis pekerjaan"]),
         "basic_salary": extract_amount(text, ["basic salary", "basic pay", "gaji pokok"]),
@@ -594,7 +678,110 @@ def extract_common_fields(text: str, lowered: str, document_type: str) -> dict:
     if document_type == "pension_slip" and not fields["employment_type"]:
         fields["employment_type"] = "Pensioner"
 
+    if document_type == "ic":
+        ic_fields = extract_ic_fields(text, raw_text or text)
+        fields.update(ic_fields)
+
     return fields
+
+
+def extract_ic_fields(text: str, raw_text: str) -> dict:
+    lines = extract_candidate_lines(raw_text or text)
+    ic_number = find_ic_number(text)
+    derived_birth_date = derive_birth_date_from_ic_number(ic_number)
+    derived_gender = derive_gender_from_ic_number(ic_number)
+    address_lines = extract_ic_address_lines(lines)
+
+    return {
+        "full_name": extract_ic_name(lines, ic_number),
+        "ic_number": ic_number,
+        "date_of_birth": derived_birth_date or extract_date_of_birth(text),
+        "address": " ".join(address_lines) if address_lines else None,
+        "gender": derived_gender,
+    }
+
+
+def extract_candidate_lines(raw_text: str) -> list[str]:
+    normalized_lines = [
+        normalize_text(line)
+        for line in re.split(r"[\r\n]+", raw_text or "")
+    ]
+    lines = [line for line in normalized_lines if line]
+
+    if lines:
+        return lines
+
+    normalized = normalize_text(raw_text)
+    if not normalized:
+        return []
+
+    # Fallback for flattened OCR text when no line breaks survive.
+    synthetic = re.split(r"(?<=\d{6}-\d{2}-\d{4})\s+|(?<=\b(?:LELAKI|PEREMPUAN|WARGANEGARA|ISLAM))\s+", normalized, flags=re.IGNORECASE)
+    return [normalize_text(line) for line in synthetic if normalize_text(line)]
+
+
+def extract_ic_name(lines: list[str], ic_number: Optional[str]) -> Optional[str]:
+    candidates: list[tuple[int, str]] = []
+
+    for index, line in enumerate(lines):
+        lowered = line.lower()
+        if is_header_or_title_line(lowered):
+            continue
+        if ic_number and compact_digits(line) == compact_digits(ic_number):
+            continue
+        if is_non_name_metadata_line(lowered):
+            continue
+        if is_address_like_line(lowered):
+            continue
+
+        cleaned = clean_name(line)
+        if not cleaned:
+            continue
+
+        score = 0
+        if looks_like_person_name(cleaned):
+            score += 4
+        if cleaned.isupper():
+            score += 1
+        if 2 <= len(cleaned.split()) <= 6:
+            score += 2
+        if any(token in lowered for token in ["bin", "binti", "a/l", "a/p"]):
+            score += 2
+        if index <= 4:
+            score += 1
+
+        if score >= 5:
+            candidates.append((score, cleaned))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1][:120]
+
+
+def extract_ic_address_lines(lines: list[str]) -> list[str]:
+    best_block: list[str] = []
+    current_block: list[str] = []
+
+    for line in lines:
+        lowered = line.lower()
+        if is_address_like_line(lowered):
+            current_block.append(normalize_address_line(line))
+            continue
+
+        if current_block:
+            if address_signal_count(current_block) > address_signal_count(best_block):
+                best_block = current_block[:]
+            current_block = []
+
+    if current_block and address_signal_count(current_block) > address_signal_count(best_block):
+        best_block = current_block[:]
+
+    if address_signal_count(best_block) < 2:
+        return []
+
+    return deduplicate_preserve_order(best_block)
 
 
 def extract_name(text: str) -> Optional[str]:
@@ -616,6 +803,17 @@ def clean_name(value: str) -> Optional[str]:
         return None
 
     return cleaned[:120]
+
+
+def looks_like_person_name(value: str) -> bool:
+    tokens = [token for token in re.split(r"\s+", value) if token]
+    if not (2 <= len(tokens) <= 8):
+        return False
+
+    if any(token.isdigit() for token in tokens):
+        return False
+
+    return all(re.fullmatch(r"[A-Za-z@.\-\/]+", token) for token in tokens)
 
 
 def extract_labeled_value(text: str, labels: list[str]) -> Optional[str]:
@@ -670,6 +868,93 @@ def extract_address(text: str) -> Optional[str]:
         return value
 
     return None
+
+
+def compact_digits(value: str) -> str:
+    return re.sub(r"\D+", "", value or "")
+
+
+def is_header_or_title_line(lowered_line: str) -> bool:
+    compacted = compact_text(lowered_line)
+    return any(compact_text(phrase) in compacted for phrase in IC_NAME_HEADER_BLACKLIST)
+
+
+def is_non_name_metadata_line(lowered_line: str) -> bool:
+    if any(term in lowered_line for term in IC_METADATA_TERMS):
+        return True
+    return bool(re.search(r"\b\d{6}-?\d{2}-?\d{4}\b", lowered_line))
+
+
+def is_address_like_line(lowered_line: str) -> bool:
+    if not lowered_line or is_header_or_title_line(lowered_line):
+        return False
+
+    if any(term in lowered_line for term in {"warganegara", "agama", "religion", "islam", "lelaki", "perempuan"}):
+        return False
+
+    return address_line_score(lowered_line) >= 2
+
+
+def address_line_score(lowered_line: str) -> int:
+    score = 0
+
+    if re.search(r"\b\d{5}\b", lowered_line):
+        score += 2
+    if any(hint in lowered_line for hint in IC_ADDRESS_HINTS):
+        score += 2
+    if any(state in lowered_line for state in MALAYSIAN_STATE_TOKENS):
+        score += 2
+    if re.search(r"\b[a-z]{2,}\d+[a-z0-9\-\/]*\b", lowered_line):
+        score += 1
+    if re.search(r"\b\d+\b", lowered_line):
+        score += 1
+
+    return score
+
+
+def address_signal_count(lines: list[str]) -> int:
+    return sum(address_line_score(line.lower()) for line in lines)
+
+
+def normalize_address_line(line: str) -> str:
+    return normalize_text(re.sub(r"\s+", " ", line)).upper()
+
+
+def derive_birth_date_from_ic_number(ic_number: Optional[str]) -> Optional[str]:
+    digits = compact_digits(ic_number)
+    if len(digits) != 12:
+        return None
+
+    yy = int(digits[0:2])
+    mm = int(digits[2:4])
+    dd = int(digits[4:6])
+    today = date.today()
+    candidate_years = [1900 + yy, 2000 + yy]
+
+    valid_dates: list[date] = []
+    for year in candidate_years:
+        try:
+            candidate = date(year, mm, dd)
+        except ValueError:
+            continue
+
+        age = today.year - candidate.year - ((today.month, today.day) < (candidate.month, candidate.day))
+        if 0 <= age <= 120 and candidate <= today:
+            valid_dates.append(candidate)
+
+    if not valid_dates:
+        return None
+
+    chosen = min(valid_dates, key=lambda candidate: abs((today.year - candidate.year) - 40))
+    return chosen.isoformat()
+
+
+def derive_gender_from_ic_number(ic_number: Optional[str]) -> Optional[str]:
+    digits = compact_digits(ic_number)
+    if len(digits) != 12 or derive_birth_date_from_ic_number(ic_number) is None:
+        return None
+
+    return "male" if int(digits[-1]) % 2 == 1 else "female"
 
 
 def extract_statement_period(text: str, filename: Optional[str] = None) -> tuple[Optional[int], Optional[int], Optional[str]]:
@@ -783,8 +1068,17 @@ def determine_review_reasons(
         if ic_side not in {"front", "back"}:
             reasons.append("ic_side_uncertain")
 
-        if not (fields.get("full_name") or fields.get("ic_number")):
+        if not fields.get("ic_number"):
             reasons.append("missing_ic_identity_fields")
+
+        if not fields.get("full_name"):
+            reasons.append("missing_ic_name")
+
+        if not fields.get("address") and ic_side == "front":
+            reasons.append("missing_ic_address")
+
+        if fields.get("ic_number") and not fields.get("date_of_birth"):
+            reasons.append("invalid_ic_birth_date")
 
         return list(dict.fromkeys(reasons))
 

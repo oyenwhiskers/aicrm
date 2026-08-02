@@ -251,4 +251,67 @@ class LeadExtractionWorkflowTest extends TestCase
         $this->assertContains('contradictory_ic_payroll_evidence', data_get($metadata, 'classification.review_reasons', []));
         $this->assertNull($lead->fresh()->ic_number);
     }
+
+    public function test_laravel_does_not_mark_ic_for_review_from_raw_text_field_names_alone(): void
+    {
+        Storage::fake('public');
+
+        $lead = Lead::query()->create([
+            'name' => 'IC Guard Lead',
+            'phone_number' => '+60128881111',
+            'stage' => LeadStage::DOC_REQUESTED,
+        ]);
+
+        $lead->profile()->create();
+
+        $document = app(DocumentService::class)->storeAndRegister(
+            $lead,
+            UploadedFile::fake()->image('ic-front.jpeg'),
+            'other',
+            null,
+        );
+
+        $mock = Mockery::mock(DocumentIntelligenceServiceInterface::class);
+        $mock->shouldReceive('isConfigured')
+            ->once()
+            ->andReturn(true);
+        $mock->shouldReceive('extractDocument')
+            ->once()
+            ->andReturn([
+                'summary' => 'Detected Malaysian IC document with front classification at high confidence.',
+                'confidence' => 'high',
+                'needs_review' => false,
+                'review_reasons' => [],
+                'classification' => [
+                    'document_type' => 'ic',
+                    'ic_side' => 'front',
+                    'statement_year' => null,
+                    'statement_month' => null,
+                    'statement_period' => null,
+                ],
+                'fields' => [
+                    'full_name' => 'Jane Doe',
+                    'ic_number' => '900101101234',
+                    'date_of_birth' => '1990-01-01',
+                    'address' => null,
+                    'employer' => null,
+                    'basic_salary' => null,
+                    'gross_income' => null,
+                    'net_pay' => null,
+                ],
+                'raw_text' => '{"fields":{"basic_salary":null,"gross_income":null,"net_pay":null}}',
+            ]);
+
+        $this->app->instance(DocumentIntelligenceServiceInterface::class, $mock);
+
+        $record = app(ExtractionService::class)->extract($document->fresh());
+
+        $this->assertSame(ExtractionStatus::COMPLETED, $record->extraction_status);
+
+        $metadata = $document->fresh()->metadata;
+
+        $this->assertSame('ic', data_get($metadata, 'classification.document_type'));
+        $this->assertFalse((bool) data_get($metadata, 'classification.needs_review', false));
+        $this->assertNotContains('contradictory_ic_payroll_evidence', data_get($metadata, 'classification.review_reasons', []));
+    }
 }

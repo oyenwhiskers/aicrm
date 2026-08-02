@@ -14,6 +14,8 @@
             data-app-short-name="LPS"
             data-api-base="/api"
             data-page="{{ $page ?? 'workspace' }}"
+            data-ai-monitoring-display-currency="{{ config('services.ai_monitoring.display_currency', 'USD') }}"
+            data-ai-monitoring-usd-to-myr-rate="{{ config('services.ai_monitoring.exchange_rates.usd_to_myr', 1) }}"
             data-current-path="{{ request()->path() }}">
         </div>
     </body>

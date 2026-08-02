@@ -14,6 +14,10 @@ Route::get('/lead-intake', function () {
     return view('crm', ['page' => 'intake']);
 });
 
+Route::get('/ai-monitoring', function () {
+    return view('crm', ['page' => 'ai-monitoring']);
+});
+
 Route::get('/workspace', function () {
     return view('crm', ['page' => 'workspace']);
 });

@@ -8,6 +8,8 @@ use App\Enums\ExtractionStatus;
 use App\Models\LeadDocument;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
+use RuntimeException;
 
 class ExtractionService
 {
@@ -242,7 +244,7 @@ class ExtractionService
 
     protected function buildStorageAttemptSource(LeadDocument $document, string $source, string $mode): array
     {
-        return [
+        $attempt = [
             'source' => $source,
             'mode' => $mode,
             'mime_type' => data_get($document->metadata, 'mime_type', 'application/octet-stream'),
@@ -254,6 +256,20 @@ class ExtractionService
             'shared_storage_roots' => config('services.document_intelligence.shared_storage.disk_roots', []),
             'allowed_storage_disks' => config('services.document_intelligence.shared_storage.enabled_disks', []),
         ];
+
+        if (config('services.document_intelligence.provider', 'gemini') === 'gemini') {
+            if (! filled($document->storage_disk) || ! filled($document->storage_path)) {
+                throw new RuntimeException('Document storage location is missing for Gemini extraction.');
+            }
+
+            if (! Storage::disk($document->storage_disk)->exists($document->storage_path)) {
+                throw new RuntimeException('Stored document file could not be found for Gemini extraction.');
+            }
+
+            $attempt['payload'] = Storage::disk($document->storage_disk)->get($document->storage_path);
+        }
+
+        return $attempt;
     }
 
     protected function buildFailedMetadata(array $metadata, string $errorMessage, string $defaultDocumentType): array
@@ -326,8 +342,10 @@ class ExtractionService
     {
         $documentType = DocumentType::tryFrom((string) ($classification['document_type'] ?? '')) ?? DocumentType::OTHER;
         $fields = is_array($result['fields'] ?? null) ? $result['fields'] : [];
+        // Only use operator-facing summary and filename for contradiction wording.
+        // Raw provider text can contain serialized field keys such as "basic_salary"
+        // even when the extracted values are null, which creates false IC review flags.
         $text = strtolower(trim(implode(' ', array_filter([
-            $result['raw_text'] ?? null,
             $result['summary'] ?? null,
             $filename,
         ]))));

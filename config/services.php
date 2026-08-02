@@ -88,4 +88,26 @@ return [
         ],
     ],
 
+    'ai_monitoring' => [
+        'default_overview_days' => (int) env('AI_MONITORING_DEFAULT_OVERVIEW_DAYS', 7),
+        'display_currency' => strtoupper((string) env('AI_MONITORING_DISPLAY_CURRENCY', 'USD')),
+        'exchange_rates' => [
+            'usd_to_myr' => (float) env('AI_MONITORING_USD_TO_MYR_RATE', 1),
+        ],
+        'providers' => [
+            'gemini' => [
+                'models' => [
+                    'gemini-3.5-flash-lite' => [
+                        'input_per_million_tokens' => env('AI_MONITORING_GEMINI_35_FLASH_LITE_INPUT_PER_MILLION_TOKENS'),
+                        'output_per_million_tokens' => env('AI_MONITORING_GEMINI_35_FLASH_LITE_OUTPUT_PER_MILLION_TOKENS'),
+                    ],
+                    'gemini-3.6-flash' => [
+                        'input_per_million_tokens' => env('AI_MONITORING_GEMINI_36_FLASH_INPUT_PER_MILLION_TOKENS'),
+                        'output_per_million_tokens' => env('AI_MONITORING_GEMINI_36_FLASH_OUTPUT_PER_MILLION_TOKENS'),
+                    ],
+                ],
+            ],
+        ],
+    ],
+
 ];

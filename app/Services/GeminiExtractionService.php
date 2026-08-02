@@ -8,11 +8,17 @@ use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Carbon;
 use RuntimeException;
 
 class GeminiExtractionService
 {
-    public function extract(?string $mimeType, string $base64Payload): array
+    public function __construct(
+        protected AiUsageLogService $aiUsageLogService,
+    ) {
+    }
+
+    public function extract(?string $mimeType, string $base64Payload, array $context = []): array
     {
         $decoded = $this->requestJson(
             $this->documentWorkflowPrompt(),
@@ -21,6 +27,7 @@ class GeminiExtractionService
             [
                 'model' => config('services.gemini.model'),
                 'retry_delays' => [2000, 5000, 10000],
+                'context' => $context,
             ],
         );
 
@@ -40,7 +47,7 @@ class GeminiExtractionService
         ];
     }
 
-    public function extractLeadCaptureImage(?string $mimeType, string $base64Payload): array
+    public function extractLeadCaptureImage(?string $mimeType, string $base64Payload, array $context = []): array
     {
         $decoded = $this->requestJson(
             $this->leadCapturePrompt(),
@@ -50,6 +57,7 @@ class GeminiExtractionService
                 'model' => config('services.gemini.intake_model', config('services.gemini.model')),
                 'fallback_model' => config('services.gemini.intake_fallback_model'),
                 'retry_delays' => $this->intakeRetryDelays(),
+                'context' => $context,
             ],
         );
 
@@ -77,7 +85,14 @@ class GeminiExtractionService
 
         foreach ($models as $index => $model) {
             try {
-                return $this->requestJsonForModel($prompt, $mimeType, $base64Payload, $model, $retryDelays);
+                return $this->requestJsonForModel(
+                    $prompt,
+                    $mimeType,
+                    $base64Payload,
+                    $model,
+                    $retryDelays,
+                    $options['context'] ?? [],
+                );
             } catch (
                 ConnectionException |
                 RequestException |
@@ -94,7 +109,7 @@ class GeminiExtractionService
         throw $lastException ?? new RuntimeException('Gemini request did not return a response.');
     }
 
-    protected function requestJsonForModel(string $prompt, ?string $mimeType, string $base64Payload, string $model, array $retryDelays): array
+    protected function requestJsonForModel(string $prompt, ?string $mimeType, string $base64Payload, string $model, array $retryDelays, array $context = []): array
     {
         $response = null;
         $lastConnectionException = null;
@@ -103,6 +118,9 @@ class GeminiExtractionService
             $maxAttempts = count($retryDelays) + 1;
 
             for ($attempt = 0; $attempt < $maxAttempts; $attempt++) {
+                $requestStartedAt = Carbon::now();
+                $startedMicrotime = microtime(true);
+
                 try {
                     $response = Http::timeout(60)
                         ->withOptions([
@@ -129,6 +147,22 @@ class GeminiExtractionService
                             ],
                         ]);
                 } catch (ConnectionException $exception) {
+                    $requestFinishedAt = Carbon::now();
+                    $this->logGeminiAttempt(
+                        context: $context,
+                        model: $model,
+                        requestStartedAt: $requestStartedAt,
+                        requestFinishedAt: $requestFinishedAt,
+                        latencyMs: $this->latencyMs($startedMicrotime),
+                        httpStatus: null,
+                        requestStatus: 'failed',
+                        needsReview: false,
+                        reviewReasons: [],
+                        usage: [],
+                        errorCode: 'connection_exception',
+                        errorMessage: $exception->getMessage(),
+                    );
+
                     if (str_contains($exception->getMessage(), 'cURL error 60')) {
                         throw new RuntimeException(
                             'Gemini SSL verification failed on this machine. Set GEMINI_VERIFY_SSL=false for local development or install a valid CA bundle for PHP.',
@@ -146,9 +180,27 @@ class GeminiExtractionService
                     continue;
                 }
 
+                $requestFinishedAt = Carbon::now();
+                $latencyMs = $this->latencyMs($startedMicrotime);
+
                 if (! $this->shouldRetryResponse($response) || ! array_key_exists($attempt, $retryDelays)) {
                     break;
                 }
+
+                $this->logGeminiAttempt(
+                    context: $context,
+                    model: $model,
+                    requestStartedAt: $requestStartedAt,
+                    requestFinishedAt: $requestFinishedAt,
+                    latencyMs: $latencyMs,
+                    httpStatus: $response->status(),
+                    requestStatus: 'failed',
+                    needsReview: false,
+                    reviewReasons: [],
+                    usage: $this->extractUsageMetrics($response->json()),
+                    errorCode: $this->responseErrorCode($response),
+                    errorMessage: $this->responseErrorMessage($response),
+                );
 
                 usleep($retryDelays[$attempt] * 1000);
             }
@@ -174,6 +226,21 @@ class GeminiExtractionService
         if ($response->failed()) {
             $body = (string) $response->body();
 
+            $this->logGeminiAttempt(
+                context: $context,
+                model: $model,
+                requestStartedAt: $requestStartedAt ?? Carbon::now(),
+                requestFinishedAt: $requestFinishedAt ?? Carbon::now(),
+                latencyMs: $latencyMs ?? 0,
+                httpStatus: $response->status(),
+                requestStatus: 'failed',
+                needsReview: false,
+                reviewReasons: [],
+                usage: $this->extractUsageMetrics($response->json()),
+                errorCode: $this->responseErrorCode($response),
+                errorMessage: $this->responseErrorMessage($response),
+            );
+
             if (
                 $response->status() === 400
                 && str_contains($body, 'Only image types are supported')
@@ -187,18 +254,70 @@ class GeminiExtractionService
 
         $response->throw();
 
-        $text = collect(Arr::get($response->json(), 'candidates', []))
+        $responseJson = $response->json();
+
+        $text = collect(Arr::get($responseJson, 'candidates', []))
             ->flatMap(fn (array $candidate) => Arr::get($candidate, 'content.parts', []))
             ->pluck('text')
             ->filter()
             ->implode("\n");
 
         if ($text === '') {
+            $this->logGeminiAttempt(
+                context: $context,
+                model: $model,
+                requestStartedAt: $requestStartedAt ?? Carbon::now(),
+                requestFinishedAt: $requestFinishedAt ?? Carbon::now(),
+                latencyMs: $latencyMs ?? 0,
+                httpStatus: $response->status(),
+                requestStatus: 'failed',
+                needsReview: false,
+                reviewReasons: [],
+                usage: $this->extractUsageMetrics($responseJson),
+                errorCode: 'empty_response',
+                errorMessage: 'Gemini returned an empty extraction response.',
+            );
             throw new RuntimeException('Gemini returned an empty extraction response.');
         }
 
-        $decoded = $this->decodeJson($text);
+        try {
+            $decoded = $this->decodeJson($text);
+        } catch (RuntimeException $exception) {
+            $this->logGeminiAttempt(
+                context: $context,
+                model: $model,
+                requestStartedAt: $requestStartedAt ?? Carbon::now(),
+                requestFinishedAt: $requestFinishedAt ?? Carbon::now(),
+                latencyMs: $latencyMs ?? 0,
+                httpStatus: $response->status(),
+                requestStatus: 'failed',
+                needsReview: false,
+                reviewReasons: [],
+                usage: $this->extractUsageMetrics($responseJson),
+                errorCode: 'invalid_json',
+                errorMessage: $exception->getMessage(),
+            );
+
+            throw $exception;
+        }
+
         $decoded['_raw_text'] = $text;
+
+        $this->logGeminiAttempt(
+            context: $context,
+            model: $model,
+            requestStartedAt: $requestStartedAt ?? Carbon::now(),
+            requestFinishedAt: $requestFinishedAt ?? Carbon::now(),
+            latencyMs: $latencyMs ?? 0,
+            httpStatus: $response->status(),
+            requestStatus: ($decoded['needs_review'] ?? false) ? 'review_required' : 'success',
+            needsReview: (bool) ($decoded['needs_review'] ?? false),
+            reviewReasons: is_array($decoded['review_reasons'] ?? null) ? $decoded['review_reasons'] : [],
+            usage: $this->extractUsageMetrics($responseJson),
+            documentType: data_get($decoded, 'classification.document_type'),
+            errorCode: null,
+            errorMessage: null,
+        );
 
         return $decoded;
     }
@@ -269,9 +388,87 @@ class GeminiExtractionService
         ), static fn ($value) => $value >= 0));
     }
 
-        protected function documentWorkflowPrompt(): string
+    protected function logGeminiAttempt(
+        array $context,
+        string $model,
+        Carbon $requestStartedAt,
+        Carbon $requestFinishedAt,
+        int $latencyMs,
+        ?int $httpStatus,
+        string $requestStatus,
+        bool $needsReview,
+        array $reviewReasons,
+        array $usage,
+        ?string $documentType = null,
+        ?string $errorCode = null,
+        ?string $errorMessage = null,
+    ): void {
+        $this->aiUsageLogService->logRequest([
+            'provider' => 'gemini',
+            'request_context' => $context['request_context'] ?? 'document_extraction',
+            'model' => $model,
+            'lead_id' => $context['lead_id'] ?? null,
+            'lead_document_id' => $context['lead_document_id'] ?? null,
+            'document_type' => $documentType,
+            'input_mime_type' => $context['input_mime_type'] ?? null,
+            'input_filename' => $context['input_filename'] ?? null,
+            'input_tokens' => $usage['input_tokens'] ?? null,
+            'output_tokens' => $usage['output_tokens'] ?? null,
+            'total_tokens' => $usage['total_tokens'] ?? null,
+            'latency_ms' => $latencyMs,
+            'http_status' => $httpStatus,
+            'request_status' => $requestStatus,
+            'needs_review' => $needsReview,
+            'review_reasons' => $reviewReasons,
+            'error_code' => $errorCode,
+            'error_message' => $errorMessage,
+            'request_started_at' => $requestStartedAt,
+            'request_finished_at' => $requestFinishedAt,
+        ]);
+    }
+
+    protected function extractUsageMetrics(array $payload): array
     {
-                return <<<'PROMPT'
+        return [
+            'input_tokens' => $this->nullableInt(Arr::get($payload, 'usageMetadata.promptTokenCount')),
+            'output_tokens' => $this->nullableInt(Arr::get($payload, 'usageMetadata.candidatesTokenCount')),
+            'total_tokens' => $this->nullableInt(Arr::get($payload, 'usageMetadata.totalTokenCount')),
+        ];
+    }
+
+    protected function responseErrorCode(Response $response): ?string
+    {
+        $status = Arr::get($response->json(), 'error.status');
+
+        return is_string($status) && $status !== '' ? $status : null;
+    }
+
+    protected function responseErrorMessage(Response $response): ?string
+    {
+        $message = Arr::get($response->json(), 'error.message');
+
+        if (is_string($message) && trim($message) !== '') {
+            return trim($message);
+        }
+
+        $body = trim((string) $response->body());
+
+        return $body !== '' ? $body : null;
+    }
+
+    protected function latencyMs(float $startedMicrotime): int
+    {
+        return max(0, (int) round((microtime(true) - $startedMicrotime) * 1000));
+    }
+
+    protected function nullableInt(mixed $value): ?int
+    {
+        return is_numeric($value) ? (int) $value : null;
+    }
+
+    protected function documentWorkflowPrompt(): string
+    {
+        return <<<'PROMPT'
 You are classifying and extracting data from a Malaysian loan document.
 Return valid JSON only with this exact shape:
 {
@@ -314,9 +511,9 @@ Rules:
 PROMPT;
     }
 
-        protected function leadCapturePrompt(): string
-        {
-                return <<<'PROMPT'
+    protected function leadCapturePrompt(): string
+    {
+        return <<<'PROMPT'
 You are reading a screenshot or image that contains a list of loan leads.
 Extract each visible lead entry into structured JSON.
 Return valid JSON only with this exact shape:

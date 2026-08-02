@@ -59,7 +59,17 @@ class DocumentIntelligenceLogicTest(unittest.TestCase):
     def test_detects_ic_front(self) -> None:
         result = process_document(
             content_base64=encode_text(
-                "KAD PENGENALAN Name: JANE DOE 900101-10-1234 1990-01-01 WARGANEGARA"
+                "\n".join(
+                    [
+                        "KAD PENGENALAN",
+                        "Name: JANE DOE",
+                        "900101-10-1234",
+                        "NO 5 JALAN MAWAR",
+                        "43000 KAJANG",
+                        "SELANGOR",
+                        "WARGANEGARA",
+                    ]
+                )
             ),
             mime_type="text/plain",
             filename="ic-front.txt",
@@ -198,6 +208,108 @@ class DocumentIntelligenceLogicTest(unittest.TestCase):
         self.assertEqual("back", result["classification"]["ic_side"])
         self.assertIn("pendaftaran negara", result["provider_meta"]["decision_evidence"]["back_markers"])
         self.assertEqual("high", result["confidence"])
+
+    def test_ic_front_extraction_prefers_real_name_and_multiline_address(self) -> None:
+        result = process_document(
+            content_base64=encode_text(
+                "\n".join(
+                    [
+                        "KAD PENGENALAN",
+                        "MALAYSIA",
+                        "IDENTITY CARD",
+                        "920324-01-6167",
+                        "MOHAMMAD IQBAL BIN MAHADI",
+                        "NO 22 JALAN PERMAI",
+                        "81930 BANDAR PENAWAR",
+                        "JOHOR",
+                        "WARGANEGARA ISLAM LELAKI",
+                    ]
+                )
+            ),
+            mime_type="text/plain",
+            filename="ic-front-detail.txt",
+            source="original",
+        )
+
+        self.assertEqual("ic", result["classification"]["document_type"])
+        self.assertEqual("front", result["classification"]["ic_side"])
+        self.assertEqual("MOHAMMAD IQBAL BIN MAHADI", result["fields"]["full_name"])
+        self.assertEqual("NO 22 JALAN PERMAI 81930 BANDAR PENAWAR JOHOR", result["fields"]["address"])
+        self.assertEqual("1992-03-24", result["fields"]["date_of_birth"])
+        self.assertEqual("male", result["fields"]["gender"])
+        self.assertNotEqual("KAD PENGENALAN", result["fields"]["full_name"])
+
+    def test_ic_front_without_strong_address_keeps_address_blank_and_reviewable(self) -> None:
+        result = process_document(
+            content_base64=encode_text(
+                "\n".join(
+                    [
+                        "KAD PENGENALAN",
+                        "MYKAD",
+                        "920324-01-6167",
+                        "MOHAMMAD IQBAL BIN MAHADI",
+                        "WARGANEGARA ISLAM LELAKI",
+                    ]
+                )
+            ),
+            mime_type="text/plain",
+            filename="ic-front-no-address.txt",
+            source="original",
+        )
+
+        self.assertEqual("ic", result["classification"]["document_type"])
+        self.assertIsNone(result["fields"]["address"])
+        self.assertTrue(result["needs_review"])
+        self.assertIn("missing_ic_address", result["review_reasons"])
+
+    def test_invalid_ic_number_does_not_derive_birth_date_or_gender(self) -> None:
+        result = process_document(
+            content_base64=encode_text(
+                "\n".join(
+                    [
+                        "KAD PENGENALAN",
+                        "MYKAD",
+                        "991332-01-6168",
+                        "NUR AIN BINTI OSMAN",
+                        "NO 10 JALAN MAWAR",
+                        "43000 KAJANG",
+                        "SELANGOR",
+                    ]
+                )
+            ),
+            mime_type="text/plain",
+            filename="ic-front-invalid-dob.txt",
+            source="original",
+        )
+
+        self.assertEqual("ic", result["classification"]["document_type"])
+        self.assertIsNone(result["fields"]["date_of_birth"])
+        self.assertIsNone(result["fields"]["gender"])
+        self.assertIn("invalid_ic_birth_date", result["review_reasons"])
+
+    def test_ic_back_does_not_invent_front_only_identity_fields(self) -> None:
+        result = process_document(
+            content_base64=encode_text(
+                "\n".join(
+                    [
+                        "KETUA PENGARAH PENDAFTARAN NEGARA",
+                        "920324-01-6167-05-01",
+                        "PENDAFTARAN NEGARA",
+                        "Touch n Go",
+                    ]
+                )
+            ),
+            mime_type="text/plain",
+            filename="ic-back-detail.txt",
+            source="original",
+        )
+
+        self.assertEqual("ic", result["classification"]["document_type"])
+        self.assertEqual("back", result["classification"]["ic_side"])
+        self.assertIsNone(result["fields"]["full_name"])
+        self.assertIsNone(result["fields"]["address"])
+        self.assertEqual("1992-03-24", result["fields"]["date_of_birth"])
+        self.assertEqual("male", result["fields"]["gender"])
 
     def test_detects_ctos_with_high_confidence(self) -> None:
         result = process_document(

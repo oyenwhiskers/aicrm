@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\LeadController;
+use App\Http\Controllers\Api\AiMonitoringController;
 use App\Http\Controllers\Api\LeadBankMatchController;
 use App\Http\Controllers\Api\LeadCaptureController;
 use App\Http\Controllers\Api\LeadDocumentController;
@@ -10,6 +11,13 @@ use App\Http\Controllers\Api\LeadStageController;
 use Illuminate\Support\Facades\Route;
 
 Route::post('/lead-intake/extract-image', [LeadCaptureController::class, 'extract']);
+Route::prefix('ai-monitoring')->group(function (): void {
+    Route::get('/overview', [AiMonitoringController::class, 'overview']);
+    Route::get('/breakdowns', [AiMonitoringController::class, 'breakdowns']);
+    Route::get('/requests', [AiMonitoringController::class, 'requests']);
+    Route::delete('/logs', [AiMonitoringController::class, 'destroyLogs']);
+});
+
 Route::prefix('lead-intake')->group(function (): void {
     Route::post('/batches', [LeadIntakeBatchController::class, 'store']);
     Route::get('/batches/{batch}', [LeadIntakeBatchController::class, 'show']);
